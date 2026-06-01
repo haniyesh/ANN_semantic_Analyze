@@ -1,0 +1,22 @@
+# ML (CPU-only — saves ~1.5GB vs CUDA version)
+torch --index-url https://download.pytorch.org/whl/cpu
+transformers
+numpy
+pandas
+# API
+fastapi
+uvicorn[standard]
+httpx
+aiohttp
+requests
+fastembed
+
+# Database
+asyncpg
+qdrant_client
+
+# Utils
+python-dotenv
+scikit-learn
+
+vite
