@@ -1,7 +1,7 @@
 import re
 
 # ==============================
-# 🧹 EMOJI CLEANER
+# EMOJI CLEANER
 # ==============================
 _EMOJI_RE = re.compile(
     "["
@@ -17,7 +17,7 @@ _EMOJI_RE = re.compile(
 )
 
 # ==============================
-# 🚫 SPAM PHRASES
+# SPAM PHRASES (substring match)
 # ==============================
 SPAM_PHRASES = [
     # Promotions
@@ -49,11 +49,64 @@ SPAM_PHRASES = [
     "technical analysis:", "| analysis:", "| snapshot",
 ]
 
-MIN_WORDS = 5
+# ==============================
+# EXPANDED SPAM PATTERNS (regex)
+# ==============================
+EXTRA_SPAM_PATTERNS = [
+    # YouTube / channel promotion
+    r"subscribe to our",
+    r"youtube\.com/channel",
+    r"t\.me/\w+\?start",
+    r"join.*telegram",
+
+    # Price prediction clickbait
+    r"price prediction.*time to buy",
+    r"should you buy.*\?$",
+    r"will .+ reach \$",
+    r"can .+ hit \$\d",
+
+    # Weekly/daily recap (not real-time events)
+    r"weekend watch",
+    r"weekly wrap",
+    r"week in review",
+    r"daily recap",
+    r"morning update",
+
+    # Ads / sponsored
+    r"sponsored",
+    r"paid partnership",
+    r"press release",
+
+    # Generic filler
+    r"^crypto news:",
+    r"^breaking:",
+    r"top \d+ crypto",
+    r"\+ more news$",
+]
+_SPAM_RE = [re.compile(p, re.IGNORECASE) for p in EXTRA_SPAM_PATTERNS]
+
+# ==============================
+# COMMENTARY PATTERNS (regex)
+# ==============================
+COMMENTARY_PATTERNS = [
+    r"price prediction",
+    r"price forecast",
+    r"price analysis",
+    r"technical analysis",
+    r"current price of",
+    r"how (high|low) (can|will)",
+    r"where .+ headed",
+    r"bull(ish)? or bear(ish)?",
+    r"^\d+ (reasons|things|ways)",
+]
+_COMMENTARY_RE = [re.compile(p, re.IGNORECASE) for p in COMMENTARY_PATTERNS]
+
+MIN_WORDS = 6          # raised from 5
+MIN_CHARS = 25         # raised from 20
 
 
 # ==============================
-# 🧹 CLEAN TITLE
+# CLEAN TITLE
 # ==============================
 def clean_title(text: str) -> str:
     """Strip emojis and extra whitespace."""
@@ -61,7 +114,7 @@ def clean_title(text: str) -> str:
 
 
 # ==============================
-# 🔍 IS SPAM
+# IS SPAM (substring)
 # ==============================
 def is_spam(title: str) -> bool:
     """Returns True if the title contains any spam phrase."""
@@ -70,7 +123,33 @@ def is_spam(title: str) -> bool:
 
 
 # ==============================
-# 📏 IS TOO SHORT
+# IS EXTRA SPAM (regex)
+# ==============================
+def is_extra_spam(title: str) -> bool:
+    """Returns True if the title matches any expanded spam regex."""
+    return any(rx.search(title) for rx in _SPAM_RE)
+
+
+# ==============================
+# IS COMMENTARY
+# ==============================
+def is_commentary(title: str) -> bool:
+    """Returns True for price prediction / recap / opinion articles."""
+    return any(rx.search(title) for rx in _COMMENTARY_RE)
+
+
+# ==============================
+# IS LOW INFO
+# ==============================
+def is_low_info(title: str) -> bool:
+    """Returns True if title has < MIN_WORDS words or < MIN_CHARS chars."""
+    words = len(title.split())
+    chars = len(title)
+    return words < MIN_WORDS or chars < MIN_CHARS
+
+
+# ==============================
+# IS TOO SHORT (legacy, kept for compat)
 # ==============================
 def is_too_short(title: str, min_length: int = 20) -> bool:
     """Returns True if the title is too short to be real news."""
@@ -78,7 +157,7 @@ def is_too_short(title: str, min_length: int = 20) -> bool:
 
 
 # ==============================
-# 📰 IS REAL HEADLINE
+# IS REAL HEADLINE
 # ==============================
 def is_real_headline(text: str) -> bool:
     """Returns False for URLs, pure numbers, timestamps, single words."""
@@ -92,7 +171,7 @@ def is_real_headline(text: str) -> bool:
 
 
 # ==============================
-# ✅ PASSES ALL PRE-FILTERS
+# PASSES ALL PRE-FILTERS
 # ==============================
 def passes_pre_filters(title: str) -> tuple:
     """
@@ -110,13 +189,16 @@ def passes_pre_filters(title: str) -> tuple:
     if not is_real_headline(clean):
         return clean, "not a headline"
 
-    if len(clean.split()) < MIN_WORDS:
-        return clean, f"too short ({len(clean.split())} words)"
+    if is_low_info(clean):
+        return clean, f"low info ({len(clean.split())} words / {len(clean)} chars)"
 
     if is_spam(clean):
         return clean, "spam phrase detected"
 
-    if is_too_short(clean):
-        return clean, "title under 20 characters"
+    if is_extra_spam(clean):
+        return clean, "expanded spam pattern detected"
 
-    return clean, None  # ✅ passed
+    if is_commentary(clean):
+        return clean, "commentary / opinion"
+
+    return clean, None  # passed

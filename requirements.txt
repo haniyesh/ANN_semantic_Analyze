@@ -18,5 +18,6 @@ qdrant_client
 # Utils
 python-dotenv
 scikit-learn
+python-telegram-bot
 
 vite

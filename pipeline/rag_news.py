@@ -45,8 +45,8 @@ COLLECTION_NAME      = "crypto_news"
 VECTOR_SIZE          = 384
 EMBED_MODEL          = "BAAI/bge-small-en-v1.5"
 TOP_K                = 10
-BATCH_SIZE           = 100
-IMPACT_THRESHOLD_15M = 0.3
+BATCH_SIZE           = 50
+IMPACT_THRESHOLD_15M = 0.5
 IMPACT_THRESHOLD_1H  = 0.5
 SIMILARITY_THRESHOLD = 0.72
 NUM_THREADS          = 16
@@ -343,11 +343,12 @@ def upload_vectors(df: pd.DataFrame, client: QdrantClient, existing_ids: set):
         points = []
 
         for j, (idx, row) in enumerate(batch.iterrows()):
-            ts   = int(pd.Timestamp(row["published"]).timestamp())
+            _pub = pd.Timestamp(row["published"])
+            ts   = 0 if pd.isna(_pub) else int(_pub.timestamp())
             b15m = sf(row.get("btc_change_15m", 0))
             b1h  = sf(row.get("btc_change_1h",  0))
-            hour = pd.Timestamp(row["published"]).hour
-            dow  = pd.Timestamp(row["published"]).dayofweek
+            hour = 0 if pd.isna(_pub) else _pub.hour
+            dow  = 0 if pd.isna(_pub) else _pub.dayofweek
 
             points.append(PointStruct(
                 id     = int(idx),
@@ -376,7 +377,16 @@ def upload_vectors(df: pd.DataFrame, client: QdrantClient, existing_ids: set):
                 },
             ))
 
-        client.upsert(collection_name=COLLECTION_NAME, points=points)
+        for attempt in range(5):
+            try:
+                client.upsert(collection_name=COLLECTION_NAME, points=points)
+                break
+            except Exception as e:
+                if attempt == 4:
+                    raise
+                wait = 10 * (attempt + 1)
+                print(f"    ⚠ upsert failed ({e.__class__.__name__}), retry {attempt+1}/5 in {wait}s...")
+                import time; time.sleep(wait)
         print(f"    {end}/{len(titles)} uploaded...")
 
     print(f"  Done. Total in Qdrant: {len(existing_ids) + len(new_df):,}")
@@ -497,7 +507,13 @@ def build_rag_features_qdrant(
     upload_vectors(df, client, existing_ids)
 
     n          = len(df)
-    timestamps = [int(pd.Timestamp(df.iloc[i]["published"]).timestamp()) for i in range(n)]
+    def _safe_ts(val):
+        try:
+            t = pd.Timestamp(val)
+            return 0 if pd.isna(t) else int(t.timestamp())
+        except Exception:
+            return 0
+    timestamps = [_safe_ts(df.iloc[i]["published"]) for i in range(n)]
 
     # Build macro_now for each row
     macro_contexts = []

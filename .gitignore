@@ -1,8 +1,39 @@
 .env
 .venv/
+.venv311/
 __pycache__/
 *.pyc
 *.npy
 *.pt
 *.pkl
 *.Zone.Identifier
+
+# Node
+node_modules/
+dashboard2/node_modules/
+dashboard/node_modules/
+
+# Data files (large / generated)
+*.csv
+*.json.bak
+news_cache.json
+fear_greed_cache.json
+
+# XGBoost binary model files
+xgboost_v9_clf15m.json
+xgboost_v9_clf1h.json
+xgboost_v9_reg15m.json
+xgboost_cls15.json
+xgboost_cls1h.json
+xgboost_dir.json
+xgboost_model_clf15m.json
+xgboost_model_clf1h.json
+xgboost_model_reg15m.json
+
+# Telegram session files (sensitive credentials)
+*.session
+my_session.session
+telegram_session.session
+
+# Logs
+*.log

@@ -11,7 +11,15 @@ async def create_pool():
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
-    pool = await asyncpg.create_pool(dsn=DATABASE_URL, ssl=ssl_context)
+    pool = await asyncpg.create_pool(
+        dsn=DATABASE_URL,
+        ssl=ssl_context,
+        min_size=1,
+        max_size=10,
+        timeout=8.0,               # fail fast if DB unreachable
+        command_timeout=30.0,
+        max_inactive_connection_lifetime=300.0,
+    )
     return pool
 
 

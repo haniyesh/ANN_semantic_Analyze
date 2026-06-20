@@ -28,21 +28,25 @@ GROQ_CLASSIFICATION_MODEL = os.getenv("GROQ_CLASSIFICATION_MODEL", "llama-3.1-8b
 HF_API_KEY          = os.getenv("HF_API_KEY")
 
 # Path to the trained PyTorch model file
-MODEL_PATH          = os.getenv("MODEL_PATH", "models/production_system_v5.pt")
+MODEL_PATH          = os.getenv("MODEL_PATH", "production_system_v8.pt")
 
 # ── News scoring thresholds ────────────────────────────────────────────────────
 DASHBOARD_API        = os.getenv("DASHBOARD_API", "http://localhost:8000")
-MODEL_PATH           = "production_system_v5.pt"
-CHANNEL_WEIGHTS_PATH = "channel_weights.json"
-SCORE_15M_MIN        = 0.30
-SCORE_15M_MAX        = 0.48
-SCORE_1H_MIN         = 0.30
-SCORE_1H_MAX         = 0.63
-SCORE_THRESHOLD_HIGH = 0.75
-SCORE_THRESHOLD_MEDIUM = 0.45
-IMPORTANT_MIN_CONFIDENCE = 0.70
+MODEL_PATH           = "production_system_v8.pt"
+SCORE_15M_MIN        = 0.0
+SCORE_15M_MAX        = 1.0
+SCORE_1H_MIN         = 0.0
+SCORE_1H_MAX         = 1.0
+SCORE_THRESHOLD_HIGH   = 0.67
+SCORE_THRESHOLD_MEDIUM = 0.40
+IMPORTANT_MIN_CONFIDENCE = 0.65
+IMPORTANT_MIN_SCORE      = 0.40
+IMPORTANT_MIN_SCORE_1H   = 0.40
+HOT_MIN_MODEL_SCORE      = 0.67
+HOT_MIN_MODEL_SCORE_1H   = 0.60
+HOT_MIN_CONFIDENCE       = 0.60
 HOT_MIN_SCORE_1H     = 0.60
-HOT_MAX_AGE_MIN      = 60
+HOT_MAX_AGE_MIN      = 30
 BATCH_SIZE           = 3
 # ── Cache ─────────────────────────────────────────────────────────────────────
 CACHE_FILE      = "storage/news_cache.json"
