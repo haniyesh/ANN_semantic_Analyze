@@ -30,24 +30,61 @@ HF_API_KEY          = os.getenv("HF_API_KEY")
 # Path to the trained PyTorch model file
 MODEL_PATH          = os.getenv("MODEL_PATH", "production_system_v8.pt")
 
-# ── News scoring thresholds ────────────────────────────────────────────────────
+# ── News scoring thresholds — 4-tier system ───────────────────────────────────
+# Tier    | Score  | Confidence | ~% of data
+# Hot     | ≥0.55  | ≥60%       | ~0.4%
+# Medium  | ≥0.30  | ≥55%       | ~1.5%
+# Show    | ≥0.20  | ≥50%       | ~5%
+# Hidden  | <0.20  | —          | ~95%  (never sent to dashboard)
 DASHBOARD_API        = os.getenv("DASHBOARD_API", "http://localhost:8000")
 MODEL_PATH           = "production_system_v8.pt"
 SCORE_15M_MIN        = 0.0
 SCORE_15M_MAX        = 1.0
 SCORE_1H_MIN         = 0.0
 SCORE_1H_MAX         = 1.0
-SCORE_THRESHOLD_HIGH   = 0.67
-SCORE_THRESHOLD_MEDIUM = 0.40
-IMPORTANT_MIN_CONFIDENCE = 0.65
-IMPORTANT_MIN_SCORE      = 0.40
-IMPORTANT_MIN_SCORE_1H   = 0.40
-HOT_MIN_MODEL_SCORE      = 0.67
-HOT_MIN_MODEL_SCORE_1H   = 0.60
-HOT_MIN_CONFIDENCE       = 0.60
-HOT_MIN_SCORE_1H     = 0.60
-HOT_MAX_AGE_MIN      = 30
+
+# Impact badge thresholds — uses max(score_15m, score_1h), NOT for display filtering
+SCORE_THRESHOLD_HOT    = 0.50   # Hot badge
+SCORE_THRESHOLD_MEDIUM = 0.25   # Medium badge
+SCORE_THRESHOLD_SHOW   = 0.0    # No score gate for display (confidence-only)
+SCORE_THRESHOLD_HIGH   = SCORE_THRESHOLD_HOT   # alias for legacy code
+
+# Display filter uses confidence only — no score gate
+CONF_MIN    = 0.50   # 50% — minimum confidence to display
+CONF_HOT    = CONF_MIN   # kept for backward compat, no separate hot confidence
+CONF_MEDIUM = CONF_MIN
+CONF_SHOW   = CONF_MIN
+
+# "Show" tier — minimum to display in dashboard feed (confidence only, no score gate)
+IMPORTANT_MIN_SCORE      = 0.0    # no score gate
+IMPORTANT_MIN_CONFIDENCE = CONF_MIN
+IMPORTANT_MIN_SCORE_1H   = 0.0
+
+# "Hot" tier — triggers Telegram alert (uses max of both scores)
+HOT_MIN_MODEL_SCORE      = SCORE_THRESHOLD_HOT
+HOT_MIN_CONFIDENCE       = CONF_MIN
+HOT_MIN_MODEL_SCORE_1H   = SCORE_THRESHOLD_HOT   # 1h also checked via max()
+HOT_MIN_SCORE_1H         = SCORE_THRESHOLD_HOT
+HOT_MAX_AGE_MIN          = 30
 BATCH_SIZE           = 3
+
+# ── News Importance (editorial importance — independent of price impact) ──
+import re as _re
+_IMPORTANCE_KW = _re.compile(r'\b(JUST IN|BREAKING|MASSIVE|BIG|ALERT|NOW|UPDATE|URGENT)\b', _re.IGNORECASE)
+_CHANNEL_AUTH  = {"cointelegraph": 1.0, "coindesk": 1.0, "the_block_crypto": 0.95, "WatcherGuru": 0.85, "google_news": 0.7}
+
+def news_importance(item: dict) -> dict:
+    """Return { tier: 'Key'|'Notable'|'Regular', score: 0-100 }"""
+    conf = float(item.get("confidence", 0)) / 100.0
+    probs = [float(item.get("prob_positive", 0)), float(item.get("prob_negative", 0)), float(item.get("prob_neutral", 0))]
+    sent_strength = max(probs) if probs else 0.0
+    ch_auth = _CHANNEL_AUTH.get(item.get("channel", ""), 0.5)
+    kw_boost = 0.15 if _IMPORTANCE_KW.search(item.get("title", "")) else 0.0
+    raw = (conf * 0.35) + (sent_strength * 0.25) + (ch_auth * 0.25) + kw_boost
+    pct = min(100, round(raw * 100))
+    tier = "Key" if pct >= 70 else ("Notable" if pct >= 55 else "Regular")
+    return {"tier": tier, "score": pct}
+
 # ── Cache ─────────────────────────────────────────────────────────────────────
 CACHE_FILE      = "storage/news_cache.json"
 MAX_CACHE_ITEMS = 10_000   # keep only the latest N items

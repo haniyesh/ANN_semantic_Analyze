@@ -1,8 +1,10 @@
 import asyncio
 import re
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from config import BOT_TOKEN, CHANNEL_ID
+
+BACKFILL_DAYS = 5   # fetch this many days of history on startup
 
 
 def clean_url(url: str) -> str:
@@ -89,5 +91,37 @@ async def start(news_queue):
 
     print(f"[TELEGRAM] Connecting -- monitoring {len(TELEGRAM_CHANNELS)} channels...")
     await client.start()
+
+    # ── Backfill: fetch last BACKFILL_DAYS days of history ────────
+    cutoff = datetime.now(timezone.utc) - timedelta(days=BACKFILL_DAYS)
+    total_backfill = 0
+    print(f"[TELEGRAM] Backfilling last {BACKFILL_DAYS} days (since {cutoff.date()})...")
+    for ch in TELEGRAM_CHANNELS:
+        count = 0
+        try:
+            async for msg in client.iter_messages(ch, reverse=False, limit=None):
+                if not msg or not msg.date:
+                    continue
+                msg_dt = msg.date if msg.date.tzinfo else msg.date.replace(tzinfo=timezone.utc)
+                if msg_dt < cutoff:
+                    break
+                text = (msg.text or "").strip()
+                if not text:
+                    continue
+                title = text.splitlines()[0][:300]
+                news_queue.append({
+                    "title":  title,
+                    "text":   text,
+                    "source": ch,
+                    "link":   f"https://t.me/{ch}/{msg.id}",
+                    "pub_dt": msg_dt,
+                })
+                count += 1
+        except Exception as e:
+            print(f"[TELEGRAM] Backfill error for {ch}: {e}")
+        print(f"[TELEGRAM]   {ch}: {count} historical messages queued")
+        total_backfill += count
+
+    print(f"[TELEGRAM] Backfill complete — {total_backfill} messages queued")
     print(f"[TELEGRAM] Listening: {TELEGRAM_CHANNELS}")
     await client.run_until_disconnected()

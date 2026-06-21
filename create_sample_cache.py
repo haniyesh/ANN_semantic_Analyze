@@ -36,9 +36,21 @@ def _hash(title: str) -> str:
     return hashlib.md5(title.lower().strip().encode()).hexdigest()[:12]
 
 
-def _load_bert_models():
+def _load_bert_models(force_cpu: bool = False):
     from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Force CPU when CUDA compute capability doesn't match the PyTorch build
+    if force_cpu:
+        device = torch.device("cpu")
+    else:
+        try:
+            if torch.cuda.is_available():
+                # Quick sanity-check: allocate a tiny tensor to catch capability mismatches early
+                torch.zeros(1).cuda()
+                device = torch.device("cuda")
+            else:
+                device = torch.device("cpu")
+        except Exception:
+            device = torch.device("cpu")
     print(f"  Device: {device}")
 
     print("  Loading CryptoBERT...")
@@ -264,7 +276,7 @@ def main():
             p1h  = float(clf1h.predict_proba(X)[0, 1])
             pred15 = int(p15 >= thr15)
             pred1h = int(p1h >= thr1h)
-            impact = "High" if max(p15, p1h) >= 0.67 else ("Medium" if max(p15, p1h) >= 0.40 else "Low")
+            impact = "High" if max(p15, p1h) >= 0.50 else ("Medium" if max(p15, p1h) >= 0.25 else "Low")
 
             results.append({
                 "id":               f"sample_{_hash(title)}",

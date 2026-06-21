@@ -34,7 +34,7 @@ CSV_PATH   = HERE / "news_cleaned_filtered_scored.csv"
 ETH_CACHE  = HERE / "eth_15m_klines.csv"
 BTC_CACHE  = HERE / "btc_15m_klines.csv"
 
-FETCH_FROM = datetime(2025, 1, 1, tzinfo=timezone.utc)
+FETCH_FROM = datetime.now(timezone.utc) - __import__("datetime").timedelta(days=3)
 
 CHANNELS = [
     "the_block_crypto",
@@ -335,7 +335,7 @@ def to_cache_items(msgs, cb_probs, p15, p1h, thr15, thr1h):
             "score_normalized": True,
             "pred_15m":        int(prob15 >= thr15),
             "pred_1h":         int(prob1h >= thr1h),
-            "impact":          "High" if prob15 >= 0.67 else "Medium" if prob15 >= 0.40 else "Low",
+            "impact":          "High" if max(prob15, prob1h) >= 0.50 else ("Medium" if max(prob15, prob1h) >= 0.25 else "Low"),
             "source":          "telegram_2025_2026",
         })
     return items

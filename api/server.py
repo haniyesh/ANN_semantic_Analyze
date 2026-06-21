@@ -40,11 +40,21 @@ from reduce_noise import BLOCKED_CHANNELS, passes_news_filter as _passes_news_fi
 def _passes_noise_filter(item: dict) -> bool:
     return _passes_news_filter(item.get("title", ""), item.get("channel", ""))
 
-# Score/confidence thresholds (must match frontend passesFilter in App.jsx)
-SCORE_HIGH   = 0.67   # "High impact" — 15m score threshold
-SCORE_1H_MIN = 0.60   # minimum 1h score for high-impact items
-CONF_MIN     = 60.0   # minimum confidence % to show item
-AGE_MAX_MIN  = 30     # maximum age in minutes for live-feed items
+# Impact thresholds — badges only, NOT used for display filtering
+# Display filter uses confidence only (≥50%). Score is for hot/medium coloring.
+# Uses max(model_score, model_score_1h) for tier assignment.
+SCORE_HOT    = 0.50   # Hot    tier: max(s15,s1h) ≥0.50
+SCORE_MED    = 0.25   # Medium tier: max(s15,s1h) ≥0.25
+SCORE_HIGH   = SCORE_HOT   # alias used in hot_news / explain endpoint
+CONF_MIN     = 50.0   # minimum confidence to display at all
+
+# ── News Importance — imported from config ──
+try:
+    from config import news_importance
+except ImportError:
+    import sys, os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from config import news_importance
 
 # ── Load cache on startup ──────────────────────────────────────────
 def _load_cache() -> List[dict]:
@@ -87,10 +97,11 @@ def _load_cache() -> List[dict]:
 
 all_news: List[dict] = _load_cache()
 
-# Hot = high-score items from cache (score >= 0.67)
+# Hot = max(score_15m, score_1h) >= 0.50
 hot_news: List[dict] = [
     item for item in all_news
-    if abs(float(item.get("model_score", 0))) >= SCORE_HIGH
+    if max(abs(float(item.get("model_score", 0))),
+           abs(float(item.get("model_score_1h", 0)))) >= SCORE_HOT
 ]
 
 print(f"✅ Loaded {len(all_news)} news items from cache  ({len(hot_news)} hot)")
@@ -374,13 +385,16 @@ async def _cache_refresh_loop():
             fresh = [i for i in new_items if i.get("id") not in existing_ids]
             if fresh:
                 all_news = new_items
-                hot_news = [i for i in all_news if abs(float(i.get("model_score", 0))) >= SCORE_HIGH]
+                hot_news = [i for i in all_news
+                            if max(abs(float(i.get("model_score", 0))),
+                                   abs(float(i.get("model_score_1h", 0)))) >= SCORE_HOT]
                 _idf_cache = None
                 _last_cache_mtime = mtime
                 print(f"🔄 Cache refreshed: {len(all_news)} items, {len(fresh)} new")
                 for item in fresh:
                     await _broadcast(_ws_all_clients, item)
-                    if abs(float(item.get("model_score", 0))) >= SCORE_HIGH:
+                    if max(abs(float(item.get("model_score", 0))),
+                           abs(float(item.get("model_score_1h", 0)))) >= SCORE_HOT:
                         await _broadcast(_ws_hot_clients, item)
         except Exception as exc:
             print(f"⚠️  Cache refresh error: {exc}")
@@ -416,6 +430,61 @@ async def ws_hot(ws: WebSocket):
 
 
 # ── REST — news ────────────────────────────────────────────────────
+@app.post("/news")
+async def ingest_news(item: dict):
+    """Receive a scored news item from main.py and persist it to the cache."""
+    global all_news, hot_news, _idf_cache
+
+    # Normalise channel name
+    ch = item.get("channel", "")
+    if ch in _CHANNEL_NORM:
+        norm = _CHANNEL_NORM[ch]
+        if norm is None:
+            return {"status": "blocked"}
+        item["channel"] = norm
+
+    if item.get("channel") in BLOCKED_CHANNELS:
+        return {"status": "blocked"}
+
+    if not _passes_noise_filter(item):
+        return {"status": "filtered"}
+
+    # Ensure published_ts exists
+    if "published_ts" not in item and item.get("id"):
+        item["published_ts"] = int(item["id"]) // 1000
+
+    # Deduplicate by id
+    existing_ids = {i.get("id") for i in all_news}
+    if item.get("id") in existing_ids:
+        return {"status": "duplicate"}
+
+    # Prepend to in-memory list and trim to MAX_CACHE_ITEMS
+    MAX = 10_000
+    all_news = ([item] + all_news)[:MAX]
+    if max(abs(float(item.get("model_score", 0))),
+           abs(float(item.get("model_score_1h", 0)))) >= SCORE_HOT:
+        hot_news = ([item] + hot_news)[:MAX]
+    _idf_cache = None
+
+    # Persist to cache file atomically
+    try:
+        tmp = CACHE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(all_news, default=str), encoding="utf-8")
+        tmp.replace(CACHE_FILE)
+        global _last_cache_mtime
+        _last_cache_mtime = CACHE_FILE.stat().st_mtime
+    except Exception as e:
+        print(f"⚠️  Cache write error: {e}")
+
+    # Broadcast to WebSocket clients
+    await _broadcast(_ws_all_clients, item)
+    if max(abs(float(item.get("model_score", 0))),
+           abs(float(item.get("model_score_1h", 0)))) >= SCORE_HOT:
+        await _broadcast(_ws_hot_clients, item)
+
+    return {"status": "ok"}
+
+
 @app.get("/news/since")
 def get_since(ts: int = 0):
     """Return items with published_ts > ts — for incremental frontend polling."""
@@ -696,10 +765,11 @@ def get_report_summary():
     ts_min = ts_max = None
 
     for item in all_news:
-        sc  = abs(float(item.get("model_score", 0)))
-        if sc >= 0.67:  score_high += 1
-        elif sc >= 0.40: score_med += 1
-        else:            score_low += 1
+        sc  = max(abs(float(item.get("model_score", 0))),
+                  abs(float(item.get("model_score_1h", 0))))
+        if sc >= SCORE_HOT:   score_high += 1
+        elif sc >= SCORE_MED: score_med  += 1
+        else:                 score_low  += 1
 
         sent = item.get("sentiment", "neutral")
         cache_sentiments[sent] = cache_sentiments.get(sent, 0) + 1
@@ -913,7 +983,9 @@ async def explain_news(item: dict):
     btc_1h    = float(item.get("btc_change_1h",  0))
     channel   = item.get("channel", "unknown")
     similar   = item.get("similar", [])
-    impact    = "High" if score >= SCORE_HIGH else "Low"
+    max_score = max(score, score_1h)
+    impact    = ("Hot"    if max_score >= SCORE_HOT  else
+                 "Medium" if max_score >= SCORE_MED  else "Show")
 
     sim_block = "No similar historical news found."
     if similar:
@@ -1020,8 +1092,8 @@ def _get_analyzer_models():
     if _analyzer_models:
         return _analyzer_models
     from create_sample_cache import _load_bert_models, _load_xgb
-    print("🔄 Loading BERT + XGBoost models for custom analyzer...")
-    bert = _load_bert_models()
+    print("🔄 Loading BERT + XGBoost models for custom analyzer (CPU)...")
+    bert = _load_bert_models(force_cpu=True)
     clf15, _clf1h, scaler, thr15, _thr1h = _load_xgb()
     _analyzer_models.update({"bert": bert, "clf15": clf15, "scaler": scaler, "thr15": thr15})
     print("✅ Analyzer models ready")
@@ -1063,7 +1135,8 @@ async def analyze_custom(body: dict):
         p15  = float(clf15.predict_proba(X)[0, 1])
         pred = int(p15 >= thr15)
 
-        impact = "High" if p15 >= SCORE_HIGH else "Low"
+        impact = ("Hot"    if p15 >= SCORE_HOT  else
+                  "Medium" if p15 >= SCORE_MED  else "Show")
         signal = "BUY" if sent["sentiment"] == "positive" else ("SELL" if sent["sentiment"] == "negative" else "NEUTRAL")
 
         from xgboost_v9 import crypto_news_type_classify
@@ -1084,6 +1157,9 @@ async def analyze_custom(body: dict):
             "model_score_pct": round(p15 * 100, 1),
             "pred_15m":       pred,
             "impact":         impact,
+            "news_importance": news_importance({"title": title, "confidence": sent["confidence"] * 100,
+                              "prob_positive": sent["prob_positive"], "prob_negative": sent["prob_negative"],
+                              "prob_neutral": sent["prob_neutral"], "channel": "live"}),
             "signal":         signal,
             "news_type":      top_type,
         }

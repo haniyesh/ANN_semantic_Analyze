@@ -11,9 +11,10 @@ Flow:
        crypto-specific types             → CryptoBERT
      CryptoBERT embedding is shared — no duplicate forward pass.
   3. Run through XGBoost v9 model (DualBERT + PriceContext, 1578 features)
-  4. Route:
-     - ALL: score >= 0.40 AND confidence >= 60%
-     - HOT: score >= 0.67 AND score_1h >= 0.60 AND confidence >= 60% AND age < 30min
+  4. Route — display filter uses confidence only, score is for impact badges:
+     - Display gate: confidence >= 50% (no score gate)
+     - Medium badge: max(score_15m, score_1h) >= 0.25
+     - Hot badge:    max(score_15m, score_1h) >= 0.50
 """
 
 import asyncio
@@ -39,17 +40,16 @@ from config import (
     MODEL_PATH,
     SCORE_15M_MIN, SCORE_15M_MAX,
     SCORE_1H_MIN,  SCORE_1H_MAX,
-    SCORE_THRESHOLD_HIGH,
+    SCORE_THRESHOLD_HOT,
     SCORE_THRESHOLD_MEDIUM,
+    SCORE_THRESHOLD_SHOW,
     IMPORTANT_MIN_CONFIDENCE,
     IMPORTANT_MIN_SCORE,
-    IMPORTANT_MIN_SCORE_1H,
     HOT_MIN_MODEL_SCORE,
-    HOT_MIN_MODEL_SCORE_1H,
     HOT_MIN_CONFIDENCE,
-    HOT_MIN_SCORE_1H,
     HOT_MAX_AGE_MIN,
     BATCH_SIZE,
+    news_importance,
 )
 
 from bot.telegram_listener import start as start_telegram_listener
@@ -80,7 +80,7 @@ def _normalize_score(raw: float, min_val: float, max_val: float) -> float:
 
 # ── DISPLAY THRESHOLDS ───────────────────────────────────────────────
 # All thresholds imported from config.py (single source of truth)
-# Tiers: Medium (≥0.40) | High (≥0.67) — Low is never stored or shown
+# Tiers: Show (≥0.20/50%) | Medium (≥0.30/55%) | Hot (≥0.55/60%) | Hidden (<0.20)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -183,10 +183,10 @@ def _load_model():
         print("  ⚠️  XGBoost scaler not found — run xgboost_v9.py first")
         return {}
 
-    # Load FinBERT for live embeddings (alongside CryptoBERT)
+    # Load FinBERT for live embeddings — always CPU to avoid CUDA capability mismatch
     from transformers import AutoTokenizer, AutoModel
     fb_tok = AutoTokenizer.from_pretrained("ProsusAI/finbert")
-    fb_mdl = AutoModel.from_pretrained("ProsusAI/finbert").eval()
+    fb_mdl = AutoModel.from_pretrained("ProsusAI/finbert").eval().to("cpu")
 
     thr15, thr1h = 0.295, 0.265
     res_path = ROOT_DIR / "xgboost_v9_results.json"
@@ -354,31 +354,19 @@ def query_rag(title: str, published_ts: int, channel: str) -> tuple[np.ndarray, 
 # ══════════════════════════════════════════════════════════════════
 def is_hot(model_score: float, model_score_1h: float,
            confidence: float, age_minutes: float) -> bool:
-    """
-    HOT: score_15m >= 0.67 AND score_1h >= 0.60
-         AND confidence >= 0.60 AND age < 30min
-    """
+    """Hot tier: max(score_15m, score_1h) >= 0.50 AND confidence >= 50% AND age < 30min."""
     return (
-        abs(model_score)    >= HOT_MIN_MODEL_SCORE    and
-        abs(model_score_1h) >= HOT_MIN_MODEL_SCORE_1H and
-        confidence          >= HOT_MIN_CONFIDENCE      and
-        age_minutes         <  HOT_MAX_AGE_MIN
+        max(abs(model_score), abs(model_score_1h)) >= HOT_MIN_MODEL_SCORE and
+        confidence       >= HOT_MIN_CONFIDENCE   and
+        age_minutes      <  HOT_MAX_AGE_MIN
     )
 
 
-def should_display_in_all(          # ← خط 455
-    model_score, model_score_1h,
-    confidence, title=""
-):
+def should_display_in_all(model_score, model_score_1h, confidence, title=""):
+    """Display gate: confidence >= 50% AND title >= 20 chars (no score gate)."""
     if len(title.strip()) < 20:
         return False
-    score    = abs(model_score)
-    score_1h = abs(model_score_1h)
-    best     = max(score, score_1h)
-    if best >= HOT_MIN_MODEL_SCORE:
-        return True
-    score_ok = score >= IMPORTANT_MIN_SCORE or score_1h >= IMPORTANT_MIN_SCORE_1H  # ← خط 472
-    return score_ok and confidence >= IMPORTANT_MIN_CONFIDENCE    
+    return confidence >= IMPORTANT_MIN_CONFIDENCE
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -605,8 +593,9 @@ async def process_news_item(news: dict):
         "pred_1h":          model_result["pred_1h"],
         "confidence_model": model_result.get("confidence_model", 0.0),
         "impact": (
-            "High"   if model_score >= 0.67 else
-            "Medium" if model_score >= 0.40 else "Low"
+            "Hot"    if max(abs(model_score), abs(model_score_1h)) >= SCORE_THRESHOLD_HOT    else
+            "Medium" if max(abs(model_score), abs(model_score_1h)) >= SCORE_THRESHOLD_MEDIUM else
+            "Show"
         ),
         "age_minutes":      round(age_minutes, 1),
         "published_ts":     published_ts,
@@ -634,13 +623,14 @@ async def process_news_item(news: dict):
     if should_display_in_all(model_score, model_score_1h, confidence_pct / 100, title):
         print(
             f"📰 {signal_type} | w={sent['weight']} | "
-            f"score={model_score:.2f} | conf={confidence_pct}% | {title[:55]}"
+            f"score={model_score:.2f} | conf={confidence_pct}% | "
+            f"{pub_dt.strftime('%Y-%m-%d %H:%M UTC')} | {title[:55]}"
         )
         await send_to_dashboard(payload)
     else:
         print(
             f"⛔ Filtered | score={model_score:.2f} "
-            f"conf={confidence_pct}% | {title[:50]}"
+            f"conf={confidence_pct}% | {pub_dt.strftime('%Y-%m-%d %H:%M UTC')} | {title[:50]}"
         )
         return
 

@@ -69,9 +69,49 @@ function sentimentLabel(s) {
   if (s === "negative") return "Bearish";
   return "Neutral";
 }
-function signalAction(type, modelScore) {
-  if (type === "BUY")  return modelScore >= 0.67 ? "Strong Buy"  : "Buy";
-  if (type === "SELL") return modelScore >= 0.67 ? "Strong Sell" : "Sell";
+// Impact badges (coloring only — NOT used for display filtering)
+// Hot ≥0.50, Medium ≥0.25, uses max(score_15m, score_1h)
+const SCORE_HOT  = 0.50;
+const SCORE_MED  = 0.25;
+const CONF_MIN   = 50;   // minimum confidence to display at all
+
+function scoreTier(score15, conf, score1h) {
+  const s = Math.max(Math.abs(score15 || 0), Math.abs(score1h || 0));
+  const c = conf || 0;
+  if (c < CONF_MIN) return "Hidden";
+  if (s >= SCORE_HOT)  return "Hot";
+  if (s >= SCORE_MED)  return "Medium";
+  return "Show";
+}
+
+// ── News Importance (editorial importance — independent of price impact) ──
+// Combines confidence, sentiment strength, channel authority, and editorial keywords.
+// Returns { tier: "Key"|"Notable"|"Regular", score: 0–100 }
+const IMPORTANCE_KEYWORDS = /\b(JUST IN|BREAKING|MASSIVE|BIG|ALERT|NOW|UPDATE|URGENT)\b/i;
+const CHANNEL_AUTHORITY = { cointelegraph: 1.0, coindesk: 1.0, the_block_crypto: 0.95, WatcherGuru: 0.85, google_news: 0.7 };
+
+function newsTier(item) {
+  const conf = (item.confidence || 0) / 100;                         // 0–1
+  const sentStrength = Math.max(
+    item.prob_positive || 0, item.prob_negative || 0, item.prob_neutral || 0
+  );                                                                  // 0–1 (how decisive)
+  const chAuth = CHANNEL_AUTHORITY[item.channel] || 0.5;
+  const kwBoost = IMPORTANCE_KEYWORDS.test(item.title || "") ? 0.15 : 0;
+
+  // Weighted importance score (0–1)
+  const raw = (conf * 0.35) + (sentStrength * 0.25) + (chAuth * 0.25) + kwBoost;
+  const score = Math.min(1, raw);
+  const pct = Math.round(score * 100);
+
+  if (pct >= 70) return { tier: "Key",     score: pct };
+  if (pct >= 55) return { tier: "Notable", score: pct };
+  return               { tier: "Regular", score: pct };
+}
+
+function signalAction(type, modelScore, modelScore1h) {
+  const s = Math.max(Math.abs(modelScore || 0), Math.abs(modelScore1h || 0));
+  if (type === "BUY")  return s >= SCORE_HOT ? "Strong Buy"  : "Buy";
+  if (type === "SELL") return s >= SCORE_HOT ? "Strong Sell" : "Sell";
   return "Neutral";
 }
 // Normalize raw model score → 0–1 for items not yet normalized by main.py
@@ -89,14 +129,21 @@ function fmtScore(score) {
   if (score == null) return "—";
   return `${Math.round(Math.abs(score) * 100)}%`;
 }
+function cleanTitle(title = "") {
+  return title
+    .replace(/\*\*?/g, "")           // strip ** and *
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // strip markdown links [text](url) → text
+    .replace(/`([^`]*)`/g, "$1")     // strip inline code
+    .trim();
+}
 const RELIABLE_CHANNELS = new Set(["the_block_crypto", "coindesk", "cointelegraph", "WatcherGuru", "google_news"]);
 
-// Display filter: reliable channels only, 15m score only
+// Display filter: confidence + reliable channel only (NO score gate — score is for badges, not filtering)
 function passesFilter(n) {
-  const s15  = Math.abs(n.model_score || 0);
   const conf = n.confidence || 0;
   return RELIABLE_CHANNELS.has(n.channel)
-    && s15 >= 0.30 && conf >= 55
+    && conf >= CONF_MIN
+    && n.sentiment !== "neutral"
     && (n.title || "").trim().length >= 20;
 }
 function passesChartFilter(n) { return passesFilter(n); }
@@ -303,10 +350,12 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
   const wsRef           = useRef(null);
   const markersRef      = useRef(null);
   const candlesDataRef  = useRef([]);   // raw candles for price-signal detection
+  const markerNewsRef   = useRef(new Map()); // bucket time → news item, for tooltip
   const [price, setPrice]   = useState(null);
   const [change, setChange] = useState(null);
   const [loading, setLoading] = useState(true);
   const [candlesVer, setCandlesVer] = useState(0); // bumped when candles load
+  const [tooltip, setTooltip] = useState(null);    // { x, y, item }
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -397,6 +446,18 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
       setPrice(parseFloat(k.c));
     };
 
+    // Crosshair tooltip: show news title when near a marker
+    chart.subscribeCrosshairMove(param => {
+      if (!param.time || !containerRef.current) { setTooltip(null); return; }
+      const markerMap = markerNewsRef.current;
+      const ivSec = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400 }[interval] || 3600;
+      const bucket = Math.floor(param.time / ivSec) * ivSec;
+      const item = markerMap.get(bucket);
+      if (!item) { setTooltip(null); return; }
+      const rect = containerRef.current.getBoundingClientRect();
+      setTooltip({ x: (param.point?.x || 0), y: (param.point?.y || 0), item });
+    });
+
     return () => {
       ws.close();
       ro.disconnect();
@@ -425,13 +486,16 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
         if (!prev || Math.abs(n.model_score) > Math.abs(prev.model_score || 0))
           buckets.set(bucket, n);
       });
+    // Save bucket→news for tooltip lookup
+    markerNewsRef.current = new Map();
     const newsSignals = [];
     buckets.forEach((n, bucket) => {
-      const isHot = Math.abs(n.model_score || 0) >= 0.67;
+      const isHot = Math.abs(n.model_score || 0) >= SCORE_HOT;
       const t     = bucket + TZ_OFFSET;
       const pos   = n.sentiment === "positive" ? "belowBar" : "aboveBar";
       const color = n.sentiment === "positive" ? "#22c55e" : "#ef4444";
       newsSignals.push({ time: t, position: pos, color, shape: "circle", text: "", size: isHot ? 1 : 0.5 });
+      markerNewsRef.current.set(t, n);
     });
     newsSignals.sort((a, b) => a.time - b.time);
 
@@ -472,44 +536,74 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
         </div>
       )}
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
+      {tooltip && (
+        <div style={{
+          position: "absolute",
+          left: Math.min(tooltip.x + 12, (containerRef.current?.clientWidth || 400) - 260),
+          top:  Math.max(tooltip.y - 80, 8),
+          background: COLORS.panel,
+          border: `1px solid ${COLORS.border2}`,
+          borderRadius: 8,
+          padding: "8px 12px",
+          zIndex: 100,
+          maxWidth: 250,
+          pointerEvents: "none",
+          boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
+        }}>
+          <div style={{ fontSize: 10, color: tooltip.item.sentiment === "positive" ? COLORS.green : COLORS.red, fontWeight: 700, marginBottom: 3 }}>
+            {tooltip.item.sentiment === "positive" ? "▲ BULLISH" : "▼ BEARISH"}
+          </div>
+          <div style={{ fontSize: 11, color: COLORS.text, lineHeight: 1.4 }}>
+            {cleanTitle(tooltip.item.title)}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 function SentimentGauge({ news }) {
-  const WINDOW_SEC = 15 * 60; // 15 minutes
+  const [momentum, setMomentum] = useState(null); // { change, open, close }
 
-  // Only count news from the last 15 minutes
-  const nowSec  = Date.now() / 1000;
-  const recent  = news.filter(n => {
-    const ts = n.published_ts || n.received_at || 0;
-    return (nowSec - ts) <= WINDOW_SEC;
-  });
+  useEffect(() => {
+    const fetchMomentum = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/proxy/klines?symbol=BTCUSDT&interval=15m&limit=2`);
+        const data = await res.json();
+        if (data && data.length >= 2) {
+          const prev  = data[data.length - 2];
+          const curr  = data[data.length - 1];
+          const open  = parseFloat(curr[1]);
+          const close = parseFloat(curr[4]);
+          const change = ((close - open) / open) * 100;
+          setMomentum({ change, open, close });
+        }
+      } catch {}
+    };
+    fetchMomentum();
+    const iv = setInterval(fetchMomentum, 30_000);
+    return () => clearInterval(iv);
+  }, []);
 
-  const hasRecent = recent.length > 0;
-  const base    = hasRecent ? recent : [];
-  const total   = base.length || 1;
-  const bullish = base.filter(n => n.sentiment === "positive").length;
-  const bearish = base.filter(n => n.sentiment === "negative").length;
-  const neutral = total - bullish - bearish;
-
-  // If no recent news → neutral (50)
-  const value   = hasRecent ? Math.round(50 + (bullish - bearish) / total * 50) : 50;
-  const bullPct = hasRecent ? Math.round((bullish / total) * 100) : 0;
-  const bearPct = hasRecent ? Math.round((bearish / total) * 100) : 0;
-  const neuPct  = 100 - bullPct - bearPct;
+  // Map price change to gauge value: ±3% → 0–100
+  const MAX_CHANGE = 3;
+  const value = momentum != null
+    ? Math.round(Math.min(100, Math.max(0, 50 + (momentum.change / MAX_CHANGE) * 50)))
+    : 50;
+  const ready = momentum != null;
 
   const angle    = (value / 100) * 180 - 90;
-  const getColor = (v) => v < 30 ? "#ef4444" : v < 50 ? "#f59e0b" : v < 70 ? "#eab308" : "#22c55e";
-  const getLabel = (v) => v < 20 ? "Extreme Fear" : v < 40 ? "Fear" : v < 60 ? "Neutral" : v < 80 ? "Greed" : "Extreme Greed";
-  const color    = hasRecent ? getColor(value) : COLORS.muted;
+  const getColor = (v) => v < 30 ? "#ef4444" : v < 45 ? "#f59e0b" : v < 55 ? "#eab308" : v < 70 ? "#22c55e" : "#16a34a";
+  const getLabel = (v) => v < 20 ? "Extreme Bear" : v < 40 ? "Bearish" : v < 60 ? "Neutral" : v < 80 ? "Bullish" : "Extreme Bull";
+  const color    = ready ? getColor(value) : COLORS.muted;
+  const changeStr = momentum ? `${momentum.change >= 0 ? "+" : ""}${momentum.change.toFixed(2)}%` : "—";
 
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
       <div style={{ display: "flex", justifyContent: "space-between", width: "100%", alignItems: "center" }}>
-        <span style={{ fontSize: 10, fontWeight: 600, color: COLORS.text }}>Live Sentiment</span>
-        <span style={{ fontSize: 9, color: hasRecent ? COLORS.accent : COLORS.muted, fontFamily: "monospace" }}>
-          {hasRecent ? `${recent.length} items · 15m` : "no recent news"}
+        <span style={{ fontSize: 10, fontWeight: 600, color: COLORS.text }}>BTC 15m Momentum</span>
+        <span style={{ fontSize: 9, color: ready ? color : COLORS.muted, fontFamily: "monospace", fontWeight: 700 }}>
+          {changeStr}
         </span>
       </div>
       <svg width="160" height="90" viewBox="0 0 160 90">
@@ -523,29 +617,46 @@ function SentimentGauge({ news }) {
         </defs>
         <path d="M 15 80 A 65 65 0 0 1 145 80" fill="none" stroke={COLORS.border2} strokeWidth="12" strokeLinecap="round" />
         <path d="M 15 80 A 65 65 0 0 1 145 80" fill="none"
-          stroke={hasRecent ? "url(#gaugeGrad)" : COLORS.border2} strokeWidth="12" strokeLinecap="round" />
+          stroke={ready ? "url(#gaugeGrad)" : COLORS.border2} strokeWidth="12" strokeLinecap="round" />
         <g transform={`rotate(${angle}, 80, 80)`}>
           <line x1="80" y1="80" x2="80" y2="22" stroke={color} strokeWidth="2.5" strokeLinecap="round" />
           <circle cx="80" cy="80" r="5" fill={color} />
         </g>
-        <text x="80" y="68" textAnchor="middle" fill={hasRecent ? COLORS.text : COLORS.muted}
+        <text x="80" y="68" textAnchor="middle" fill={ready ? COLORS.text : COLORS.muted}
           fontSize="22" fontWeight="700" fontFamily="monospace">{value}</text>
       </svg>
       <span style={{ fontFamily: "monospace", fontSize: 12, color, letterSpacing: 2, textTransform: "uppercase" }}>
-        {hasRecent ? getLabel(value) : "NEUTRAL"}
+        {getLabel(value)}
       </span>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, width: "100%", marginTop: 4 }}>
-        {[["Bullish", bullPct, COLORS.green], ["Neutral", neuPct, COLORS.gold], ["Bearish", bearPct, COLORS.red]].map(([label, pct, clr]) => (
-          <div key={label}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-              <span style={{ fontSize: 9, color: COLORS.muted, letterSpacing: 1 }}>{label.toUpperCase()}</span>
-              <span style={{ fontSize: 9, color: hasRecent ? clr : COLORS.muted, fontFamily: "monospace" }}>{pct}%</span>
-            </div>
-            <div style={{ height: 3, background: COLORS.border2, borderRadius: 2 }}>
-              <div style={{ height: "100%", width: `${pct}%`, background: hasRecent ? clr : COLORS.border2, borderRadius: 2 }} />
-            </div>
+      {/* Price momentum bar */}
+      <div style={{ width: "100%", marginTop: 4 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+          <span style={{ fontSize: 9, color: COLORS.muted, letterSpacing: 1 }}>BEAR</span>
+          <span style={{ fontSize: 9, color: COLORS.muted, letterSpacing: 1 }}>BULL</span>
+        </div>
+        <div style={{ height: 4, background: COLORS.border2, borderRadius: 2, position: "relative" }}>
+          {/* center line */}
+          <div style={{ position: "absolute", left: "50%", top: 0, width: 1, height: "100%", background: COLORS.border2 }} />
+          {/* fill from center */}
+          {ready && (() => {
+            const pct = Math.min(50, Math.abs(momentum.change) / MAX_CHANGE * 50);
+            const isBull = momentum.change >= 0;
+            return <div style={{
+              position: "absolute",
+              top: 0, height: "100%", borderRadius: 2,
+              left: isBull ? "50%" : `${50 - pct}%`,
+              width: `${pct}%`,
+              background: isBull ? COLORS.green : COLORS.red,
+            }} />;
+          })()}
+        </div>
+        {momentum && (
+          <div style={{ display: "flex", justifyContent: "center", marginTop: 4 }}>
+            <span style={{ fontSize: 9, fontFamily: "monospace", color }}>
+              {momentum.change >= 0 ? "▲" : "▼"} {Math.abs(momentum.change).toFixed(3)}% / 15m candle
+            </span>
           </div>
-        ))}
+        )}
       </div>
     </div>
   );
@@ -603,8 +714,10 @@ function ExplainPanel({ selectedNews: item, onClose }) {
   }, [item?.id]);
 
   const score      = item ? Math.abs(item.model_score || 0) : 0;
-  const impactClr  = score >= 0.67 ? COLORS.red : COLORS.muted;
-  const impactLbl  = score >= 0.67 ? "High" : "Low";
+  const score1h    = item ? Math.abs(item.model_score_1h || 0) : 0;
+  const _tier      = item ? scoreTier(score, item.confidence, score1h) : "Hidden";
+  const impactClr  = _tier === "Hot" ? COLORS.red : _tier === "Medium" ? "#f97316" : COLORS.muted;
+  const impactLbl  = _tier === "Hot" ? "Hot" : _tier === "Medium" ? "Medium" : _tier === "Show" ? "Show" : "Low";
   const sentClr    = { positive: COLORS.green, negative: COLORS.red, neutral: COLORS.muted };
   const sColor     = item ? (sentClr[item.sentiment] || COLORS.muted) : COLORS.muted;
 
@@ -656,8 +769,8 @@ function ExplainPanel({ selectedNews: item, onClose }) {
               </div>
               <div style={{ fontSize: 12, color: COLORS.text, fontWeight: 600, lineHeight: 1.5 }}>
                 {item.link
-                  ? <a href={item.link} target="_blank" rel="noreferrer" style={{ color: COLORS.text, textDecoration: "none" }}>{item.title}</a>
-                  : item.title}
+                  ? <a href={item.link} target="_blank" rel="noreferrer" style={{ color: COLORS.text, textDecoration: "none" }}>{cleanTitle(item.title)}</a>
+                  : cleanTitle(item.title)}
               </div>
               <div style={{ fontSize: 10, color: COLORS.muted, fontFamily: "monospace", marginTop: 4 }}>
                 {item.channel || "—"} · {item.time || ""}
@@ -784,9 +897,11 @@ function NewsModal({ item, onClose }) {
   const [similar, setSimilar]       = useState(item.similar || []);
   const [simLoading, setSimLoading] = useState(false);
 
-  const score = Math.abs(item.model_score || 0);
-  const impactColor = score >= 0.67 ? COLORS.red : COLORS.muted;
-  const impactLabel = score >= 0.67 ? "High" : "Low";
+  const score   = Math.abs(item.model_score || 0);
+  const score1h = Math.abs(item.model_score_1h || 0);
+  const _t    = scoreTier(score, item.confidence, score1h);
+  const impactColor = _t === "Hot" ? COLORS.red : _t === "Medium" ? "#f97316" : COLORS.muted;
+  const impactLabel = _t === "Hot" ? "Hot" : _t === "Medium" ? "Medium" : _t === "Show" ? "Show" : "Low";
 
   // Auto-fetch similar news on open if item has none
   useEffect(() => {
@@ -844,8 +959,8 @@ function NewsModal({ item, onClose }) {
         {/* Title */}
         <div style={{ fontSize: 14, color: COLORS.text, fontWeight: 600, lineHeight: 1.5, marginBottom: 16 }}>
           {item.link
-            ? <a href={item.link} target="_blank" rel="noreferrer" style={{ color: COLORS.text, textDecoration: "none" }}>{item.title}</a>
-            : item.title}
+            ? <a href={item.link} target="_blank" rel="noreferrer" style={{ color: COLORS.text, textDecoration: "none" }}>{cleanTitle(item.title)}</a>
+            : cleanTitle(item.title)}
         </div>
 
         {/* Full stats grid — all ML fields */}
@@ -1036,15 +1151,14 @@ function NewsCard({ item, onClick }) {
             </span>
           </div>
         </div>
-        <div style={{ fontSize: 12, color: COLORS.text, lineHeight: 1.4, marginBottom: 4, fontWeight: 500 }}>{item.title}</div>
+        <div style={{ fontSize: 12, color: COLORS.text, lineHeight: 1.4, marginBottom: 4, fontWeight: 500 }}>{cleanTitle(item.title)}</div>
         <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
           {(() => {
-            const s = Math.abs(item.model_score || 0);
-            const isHigh = s >= 0.67;
-            const clr = isHigh ? COLORS.red : COLORS.gold;
-            const tooltipText = isHigh
-              ? `High Impact — Strong likelihood of Bitcoin price movement\nScore: ${fmtScore(item.model_score)}  Conf: ${item.confidence}%`
-              : `Medium Impact — Moderate likelihood of Bitcoin price movement\nScore: ${fmtScore(item.model_score)}  Conf: ${item.confidence}%`;
+            const s   = Math.abs(item.model_score || 0);
+            const s1h = Math.abs(item.model_score_1h || 0);
+            const tier = scoreTier(s, item.confidence, s1h);
+            const clr  = tier === "Hot" ? COLORS.red : tier === "Medium" ? "#f97316" : COLORS.muted;
+            const dots = tier === "Hot" ? "●●●" : tier === "Medium" ? "●●" : "●";
             return (
               <span style={{ fontSize: 10, color: COLORS.muted, display: "flex", alignItems: "center", gap: 3, position: "relative" }}>
                 Impact:&nbsp;
@@ -1053,9 +1167,9 @@ function NewsCard({ item, onClick }) {
                   onMouseLeave={() => setBulletHover(false)}
                   style={{ color: clr, fontSize: 11, letterSpacing: 1, cursor: "help" }}
                 >
-                  {isHigh ? "●●" : "●"}
+                  {dots}
                 </span>
-                <span style={{ color: clr }}>{isHigh ? "High" : "Medium"}</span>
+                <span style={{ color: clr }}>{tier}</span>
                 {bulletHover && (
                   <div style={{
                     position: "absolute", bottom: "calc(100% + 6px)", left: 0,
@@ -1065,10 +1179,10 @@ function NewsCard({ item, onClick }) {
                     boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
                   }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: clr, marginBottom: 4 }}>
-                      {isHigh ? "●● High Impact" : "● Medium Impact"}
+                      {dots} {tier} Impact
                     </div>
                     <div style={{ fontSize: 10, color: COLORS.text, lineHeight: 1.5, marginBottom: 6 }}>
-                      {item.title}
+                      {cleanTitle(item.title)}
                     </div>
                     <div style={{ fontSize: 10, color: COLORS.muted }}>
                       Score: <span style={{ color: COLORS.gold }}>{fmtScore(item.model_score)}</span>
@@ -1080,10 +1194,29 @@ function NewsCard({ item, onClick }) {
               </span>
             );
           })()}
+          {(() => {
+            const imp = newsTier(item);
+            const iClr = imp.tier === "Key" ? COLORS.purple : imp.tier === "Notable" ? COLORS.accent : COLORS.muted;
+            const iDots = imp.tier === "Key" ? "◆◆◆" : imp.tier === "Notable" ? "◆◆" : "◆";
+            return (
+              <span style={{ fontSize: 10, color: COLORS.muted, display: "flex", alignItems: "center", gap: 3 }}>
+                News:&nbsp;
+                <span style={{ color: iClr, fontSize: 10, letterSpacing: 1 }}>{iDots}</span>
+                <span style={{ color: iClr }}>{imp.tier}</span>
+              </span>
+            );
+          })()}
           <span style={{ fontSize: 10, color: COLORS.muted }}>Conf: <span style={{ color: COLORS.accent }}>{item.confidence}%</span></span>
-          {item.model_score != null && (
-            <span style={{ fontSize: 10, color: COLORS.muted }}>Score: <span style={{ color: COLORS.gold }}>{fmtScore(item.model_score)}</span></span>
-          )}
+          {item.model_score != null && (() => {
+            const eff = Math.max(Math.abs(item.model_score || 0), Math.abs(item.model_score_1h || 0));
+            const using1h = Math.abs(item.model_score_1h || 0) > Math.abs(item.model_score || 0);
+            return (
+              <span style={{ fontSize: 10, color: COLORS.muted }}>
+                Score: <span style={{ color: COLORS.gold }}>{fmtScore(eff)}</span>
+                {using1h && <span style={{ color: COLORS.muted, fontSize: 9 }}> (1h)</span>}
+              </span>
+            );
+          })()}
         </div>
       </div>
     </div>
@@ -1091,7 +1224,7 @@ function NewsCard({ item, onClick }) {
 }
 
 function SignalCard({ item }) {
-  const action = signalAction(item.type, item.model_score);
+  const action = signalAction(item.type, item.model_score, item.model_score_1h);
   const actionColors = { "Strong Buy": COLORS.green, "Buy": COLORS.blue, "Strong Sell": COLORS.red, "Sell": COLORS.red, "Neutral": COLORS.muted };
   const color  = actionColors[action] || COLORS.muted;
   const age    = itemTime(item);
@@ -1104,7 +1237,7 @@ function SignalCard({ item }) {
           <span style={{ fontSize: 10, color: COLORS.muted }}>{age}</span>
         </div>
       </div>
-      <div style={{ fontSize: 12, color: COLORS.text, lineHeight: 1.4, marginBottom: 10 }}>{item.title}</div>
+      <div style={{ fontSize: 12, color: COLORS.text, lineHeight: 1.4, marginBottom: 10 }}>{cleanTitle(item.title)}</div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}>
         {[
           ["Model Score", fmtScore(item.model_score),                              COLORS.accent],
@@ -1556,7 +1689,7 @@ function CustomAnalyzer() {
             {/* Score grid */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
               {[
-                ["15m Score",   `${result.model_score_pct}%`,  result.model_score >= 0.40 ? COLORS.gold : COLORS.muted],
+                ["15m Score",   `${result.model_score_pct}%`,  result.model_score >= SCORE_HOT ? COLORS.red : result.model_score >= SCORE_MED ? COLORS.gold : COLORS.muted],
                 ["Confidence",  `${result.confidence}%`,        COLORS.accent],
                 ["Bullish",     `${result.prob_positive}%`,     COLORS.green],
                 ["Bearish",     `${result.prob_negative}%`,     COLORS.red],
@@ -1578,7 +1711,7 @@ function CustomAnalyzer() {
               <div style={{ background: COLORS.bg, borderRadius: 4, height: 8, overflow: "hidden" }}>
                 <div style={{
                   width: `${result.model_score_pct}%`, height: "100%", borderRadius: 4,
-                  background: result.model_score >= 0.67 ? COLORS.red : result.model_score >= 0.40 ? COLORS.gold : COLORS.accent,
+                  background: result.model_score >= SCORE_HOT ? COLORS.red : result.model_score >= SCORE_MED ? COLORS.gold : COLORS.accent,
                   transition: "width 0.4s ease",
                 }} />
               </div>
@@ -1624,7 +1757,7 @@ function ModelAnalysis() {
       {/* KPI row */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
         <StatBox label="Avg Model Score"  value={`${Math.round((stats.avg_score || 0) * 100)}%`} color={COLORS.accent} />
-        <StatBox label="Avg Confidence"   value={`${(stats.avg_confidence || 0).toFixed(1)}%`} color={COLORS.blue} />
+        <StatBox label="Avg Confidence"   value={`${Math.round((stats.avg_confidence || 0) * 100)}%`} color={COLORS.blue} />
         <StatBox label="Avg Weight"       value={`${(stats.avg_weight || 0).toFixed(1)}/10`} color={COLORS.gold} />
         <StatBox label="Total Processed"  value={stats.total.toLocaleString()} color={COLORS.text} />
       </div>
@@ -1767,13 +1900,13 @@ function ChannelAnalysisPage() {
               </div>
               {/* Avg score */}
               <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                <span style={{ fontSize: 12, fontFamily: "monospace", fontWeight: 700, color: ch.avgScore >= 0.67 ? COLORS.green : ch.avgScore >= 0.50 ? COLORS.gold : COLORS.muted }}>
+                <span style={{ fontSize: 12, fontFamily: "monospace", fontWeight: 700, color: ch.avgScore >= SCORE_HOT ? COLORS.green : ch.avgScore >= SCORE_MED ? COLORS.gold : COLORS.muted }}>
                   {Math.round(ch.avgScore * 100)}%
                 </span>
                 <PerformanceBar value={ch.avgScore} max={maxScore} color={COLORS.gold} width={60} />
               </div>
               {/* Confidence */}
-              <div style={{ fontSize: 12, fontFamily: "monospace", color: COLORS.blue }}>{ch.avgConf.toFixed(1)}%</div>
+              <div style={{ fontSize: 12, fontFamily: "monospace", color: COLORS.blue }}>{(ch.avgConf * 100).toFixed(1)}%</div>
               {/* BTC impact */}
               <div style={{ fontSize: 12, fontFamily: "monospace", color: ch.btcCount > 0 ? COLORS.green : COLORS.border2 }}>
                 {ch.btcCount > 0 ? `${ch.avgBtc15.toFixed(3)}%` : "—"}
@@ -1963,7 +2096,7 @@ function useIsAdmin() {
 export default function CryptoDashboard() {
   const isAdmin = useIsAdmin();
   const [activeNav, setActiveNav]         = useState("Dashboard");
-  const [newsTab, setNewsTab]             = useState("important");
+  const [newsTab, setNewsTab]             = useState("all");
   const [coinFilter, setCoinFilter]       = useState("all"); // "all" | "btc" | "eth"
   const [selectedPair, setSelectedPair]   = useState("BINANCE:BTCUSDT");
   const [selectedSymbol, setSelectedSymbol] = useState("BTCUSDT");
@@ -1972,6 +2105,8 @@ export default function CryptoDashboard() {
   const [allNews, setAllNews]             = useState([]);
   const [hotSignals, setHotSignals]       = useState([]);
   const [selectedNews, setSelectedNews]   = useState(null);
+  const [newsH, setNewsH]                 = useState(450);
+  const newsDragRef                        = useRef({ dragging: false, startY: 0, startH: 0 });
 
   // Calendar state
   const [calendarDate, setCalendarDate]   = useState(null);  // null = today
@@ -2083,9 +2218,24 @@ export default function CryptoDashboard() {
       seen.add(key);
       return true;
     });
-    // find the most recent LOCAL date so items near UTC midnight aren't split across days
-    const latestTs  = Math.max(...unique.map(n => n.published_ts || n.received_at || 0));
-    const latestKey = localDateKey(latestTs);
+    // build list of distinct dates newest-first
+    const sorted = [...unique].sort((a, b) => (b.published_ts || b.received_at || 0) - (a.published_ts || a.received_at || 0));
+    const dateSeen = new Set();
+    const orderedDates = [];
+    for (const n of sorted) {
+      const ts = n.published_ts || n.received_at;
+      if (!ts) continue;
+      const dk = localDateKey(ts);
+      if (!dateSeen.has(dk)) { dateSeen.add(dk); orderedDates.push(dk); }
+    }
+    // pick the most recent day that has at least one item passing the display filter
+    // so we never land on a day where every item is Hidden tier
+    const latestKey = orderedDates.find(dk =>
+      unique.some(n => {
+        const ts = n.published_ts || n.received_at;
+        return ts && localDateKey(ts) === dk && passesFilter(n);
+      })
+    ) || orderedDates[0]; // fallback: show most recent day even if all Hidden
     // filter to that day, sort newest first
     return unique
       .filter(n => { const ts = n.published_ts || n.received_at; return ts ? localDateKey(ts) === latestKey : false; })
@@ -2113,24 +2263,30 @@ export default function CryptoDashboard() {
   const mostRecentIsToday = mostRecentDayNews.length > 0 &&
     localDateKey(mostRecentDayNews[0].published_ts || mostRecentDayNews[0].received_at || 0) === todayLocal;
 
-  // Tab filters — 3 tiers: Low / Medium / High
-  // Thresholds use normalized 0–1 scores (set in main.py)
-  const importantTabNews = newsForDate(n => passesChartFilter(n) && Math.abs(n.model_score || 0) >= 0.67); // High  ≥67%
-  const hotTabNews       = newsForDate(passesFilter);                                                       // Hot   ≥0.67 + age<30m
+  // Tab filters — impact badges use max(score_15m, score_1h), importance uses newsTier()
+  const hotTabNews       = newsForDate(n => passesFilter(n) && scoreTier(Math.abs(n.model_score || 0), n.confidence, Math.abs(n.model_score_1h || 0)) === "Hot");
+  const importantTabNews = newsForDate(n => passesFilter(n) && scoreTier(Math.abs(n.model_score || 0), n.confidence, Math.abs(n.model_score_1h || 0)) === "Medium");
+  const keyTabNews       = newsForDate(n => passesFilter(n) && newsTier(n).tier === "Key");   // Editorially important regardless of price impact
+  const allTabNews       = newsForDate(passesFilter);
 
-  const tabNewsRaw = newsTab === "important" ? importantTabNews : hotTabNews;
+  const tabNewsRaw = newsTab === "hot" ? hotTabNews : allTabNews;
   const tabNews = coinFilter === "all"
     ? tabNewsRaw
     : tabNewsRaw.filter(n => { const c = classifyNewsCoin(n.title); return c === coinFilter || c === "both"; });
 
+  const NavIcon = ({ d, size = 16 }) => (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      {Array.isArray(d) ? d.map((p, i) => <path key={i} d={p} />) : <path d={d} />}
+    </svg>
+  );
+
   const navItems = [
-    { icon: "◫", label: "Dashboard" },
-    { icon: "📰", label: "News & Sentiment" },
-    { icon: "⚡", label: "HOT Signals" },
-    { icon: "📄", label: "Analyze" },
+    { icon: <NavIcon d={["M3 3v18h18", "M7 16l4-4 4 4 4-8"]} />, label: "Dashboard" },
+    { icon: <NavIcon d={["M4 22h16a2 2 0 002-2V4a2 2 0 00-2-2H8L4 6v14a2 2 0 002 2z", "M8 2v4H4", "M12 12h4", "M12 16h4", "M8 12h.01", "M8 16h.01"]} />, label: "News & Sentiment" },
+    { icon: <NavIcon d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18" />, label: "Analyze" },
     ...(isAdmin ? [
-      { icon: "🧠", label: "Model Analysis" },
-      { icon: "📊", label: "Training Data" },
+      { icon: <NavIcon d="M12 2a4 4 0 014 4c0 1.5-.8 2.8-2 3.5V12h2a2 2 0 012 2v6H6v-6a2 2 0 012-2h2V9.5C8.8 8.8 8 7.5 8 6a4 4 0 014-4z" />, label: "Model Analysis" },
+      { icon: <NavIcon d={["M18 20V10", "M12 20V4", "M6 20v-6"]} />, label: "Training Data" },
     ] : []),
   ];
 
@@ -2143,11 +2299,9 @@ export default function CryptoDashboard() {
 
       {/* ── Sidebar ── */}
       <div style={{ width: 220, flexShrink: 0, background: COLORS.panel, borderRight: `1px solid ${COLORS.border}`, display: "flex", flexDirection: "column", height: "100%" }}>
-        <div style={{ padding: "20px 16px", borderBottom: `1px solid ${COLORS.border}` }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <img src="/logo.avif" alt="logo" style={{ width: 34, height: 34, borderRadius: 10, objectFit: "cover" }} />
-            <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.text, letterSpacing: 0.5 }}>Crypto Sentiment Analyze</div>
-          </div>
+        <div style={{ padding: "20px 16px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
+          <img src="/logo_center.avif" alt="logo" style={{ width: 50, height: 50, borderRadius: 10, objectFit: "cover" }} />
+          <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.text, letterSpacing: 0.5, textAlign: "center" }}>Crypto Sentiment Analyze</div>
         </div>
         <div style={{ flex: 1, padding: "12px 8px", overflowY: "auto" }}>
           {navItems.map(item => (
@@ -2203,8 +2357,8 @@ export default function CryptoDashboard() {
                   <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                     <div style={{ display: "flex", gap: 6 }}>
                       {[
-                        { id: "important", label: "Medium", count: importantTabNews.length },
-                        { id: "hot",       label: "High",   count: hotTabNews.length },
+                        { id: "hot", label: "🔥 Hot", count: hotTabNews.length },
+                        { id: "all", label: "All",   count: allTabNews.length },
                       ].map(t => (
                         <button key={t.id} onClick={() => setNewsTab(t.id)} style={{
                           padding: "4px 12px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 11,
@@ -2256,15 +2410,15 @@ export default function CryptoDashboard() {
             </div>
           )}
 
-          {/* ── HOT Signals view ── */}
-          {activeNav === "HOT Signals" && (
+          {/* ── News Signals view ── */}
+          {activeNav === "News Signals" && (
             <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
               <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
                 <div style={{ padding: "12px 20px", borderBottom: `1px solid ${COLORS.border}`, background: COLORS.panel, flexShrink: 0 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <span style={{ fontSize: 13, fontWeight: 600 }}>
-                      🔴 High Signals — <span style={{ color: COLORS.accent }}>{dateLabel}</span>
-                      <span style={{ color: COLORS.muted, fontSize: 11, marginLeft: 8 }}>{hotTabNews.length} items</span>
+                      {newsTab === "hot" ? "🔥 Hot" : "📰 All"} Signals — <span style={{ color: COLORS.accent }}>{dateLabel}</span>
+                      <span style={{ color: COLORS.muted, fontSize: 11, marginLeft: 8 }}>{tabNews.length} items</span>
                     </span>
                     <ConnectionDot connected={hotConnected} />
                   </div>
@@ -2272,10 +2426,10 @@ export default function CryptoDashboard() {
                 <div style={{ flex: 1, overflowY: "auto", padding: "10px 20px" }}>
                   {dateLoading ? (
                     <div style={{ padding: "40px 0", textAlign: "center", color: COLORS.muted, fontSize: 12 }}>Loading…</div>
-                  ) : hotTabNews.length === 0 ? (
-                    <div style={{ padding: "40px 0", textAlign: "center", color: COLORS.muted, fontSize: 12 }}>No high signals for {dateLabel}</div>
+                  ) : tabNews.length === 0 ? (
+                    <div style={{ padding: "40px 0", textAlign: "center", color: COLORS.muted, fontSize: 12 }}>No signals for {dateLabel}</div>
                   ) : (
-                    hotTabNews.map((s, i) => <SignalCard key={s.id ?? i} item={s} />)
+                    tabNews.map((s, i) => <NewsCard key={s.id ?? i} item={s} onClick={() => setSelectedNews(s)} />)
                   )}
                 </div>
               </div>
@@ -2288,9 +2442,9 @@ export default function CryptoDashboard() {
 
           {/* ── Dashboard (main) ── */}
           {activeNav === "Dashboard" && (
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-              {/* Chart header — BTC / ETH switcher + interval */}
-              <div style={{ padding: "10px 16px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", alignItems: "center", gap: 12, background: COLORS.panel, flexShrink: 0 }}>
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", overflowY: "auto" }}>
+              {/* Chart header — BTC / ETH switcher + interval + clock */}
+              <div style={{ padding: "10px 16px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", alignItems: "center", gap: 12, background: COLORS.panel, flexShrink: 0, position: "sticky", top: 0, zIndex: 10 }}>
                 <div style={{ display: "flex", gap: 6 }}>
                   {[
                     { sym: "BTCUSDT", label: "₿ BTC", color: "#F7931A" },
@@ -2316,6 +2470,11 @@ export default function CryptoDashboard() {
                     }}>{iv}</button>
                   ))}
                 </div>
+                <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+                  <span style={{ fontSize: 11, fontFamily: "monospace", color: COLORS.muted }}>
+                    {time.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}
+                  </span>
+                </div>
               </div>
 
               {/* Single chart — switches between BTC and ETH */}
@@ -2328,8 +2487,23 @@ export default function CryptoDashboard() {
                   })} />
               </div>
 
+              {/* Drag handle */}
+              <div
+                onMouseDown={e => {
+                  const d = newsDragRef.current;
+                  d.dragging = true; d.startY = e.clientY; d.startH = newsH;
+                  const onMove = ev => { if (!d.dragging) return; setNewsH(Math.max(80, Math.min(800, d.startH + (d.startY - ev.clientY)))); };
+                  const onUp   = () => { d.dragging = false; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+                  window.addEventListener("mousemove", onMove);
+                  window.addEventListener("mouseup", onUp);
+                }}
+                style={{ height: 6, flexShrink: 0, cursor: "ns-resize", background: COLORS.border, display: "flex", alignItems: "center", justifyContent: "center" }}
+              >
+                <div style={{ width: 32, height: 2, borderRadius: 2, background: COLORS.muted, opacity: 0.5 }} />
+              </div>
+
               {/* Bottom panels */}
-              <div style={{ flex: 1, display: "grid", gridTemplateColumns: "1fr 1fr", overflow: "hidden" }}>
+              <div style={{ height: newsH, flexShrink: 0, display: "grid", gridTemplateColumns: "1fr 1fr", overflow: "hidden" }}>
 
                 {/* News feed */}
                 <div style={{ borderRight: `1px solid ${COLORS.border}`, display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -2338,15 +2512,15 @@ export default function CryptoDashboard() {
                     <ConnectionDot connected={allConnected} />
                   </div>
                   {(() => {
-                    // Show TODAY's High + Medium news — use UTC date to avoid
-                    // timezone shift showing late-UTC items as "today" in UTC+N zones
-                    const todayNews  = allNews.filter(n => {
-                      const ts = n.published_ts || n.received_at;
-                      return ts ? localDateKey(ts) === todayLocal : false;
-                    });
+                    // Show all passing news from the most recent day
+                    const allPassing = allNews.filter(n => passesFilter(n));
+                    const latestKey = allPassing.length
+                      ? localDateKey(Math.max(...allPassing.map(n => n.published_ts || n.received_at || 0)))
+                      : null;
+                    const filtered = latestKey ? allPassing.filter(n => localDateKey(n.published_ts || n.received_at) === latestKey) : [];
                     // Deduplicate by title
                     const seen = new Set();
-                    const uniqueNews = todayNews.filter(n => {
+                    const uniqueNews = filtered.filter(n => {
                       if (seen.has(n.title)) return false;
                       seen.add(n.title);
                       return true;
