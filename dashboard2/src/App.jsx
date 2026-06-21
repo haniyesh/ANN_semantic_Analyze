@@ -1185,9 +1185,7 @@ function NewsCard({ item, onClick }) {
                       {cleanTitle(item.title)}
                     </div>
                     <div style={{ fontSize: 10, color: COLORS.muted }}>
-                      Score: <span style={{ color: COLORS.gold }}>{fmtScore(item.model_score)}</span>
-                      &nbsp;·&nbsp;Conf: <span style={{ color: COLORS.accent }}>{item.confidence}%</span>
-                      &nbsp;·&nbsp;<span style={{ color: color }}>{label}</span>
+                      <span style={{ color: color }}>{label}</span>
                     </div>
                   </div>
                 )}
@@ -1203,17 +1201,6 @@ function NewsCard({ item, onClick }) {
                 News:&nbsp;
                 <span style={{ color: iClr, fontSize: 10, letterSpacing: 1 }}>{iDots}</span>
                 <span style={{ color: iClr }}>{imp.tier}</span>
-              </span>
-            );
-          })()}
-          <span style={{ fontSize: 10, color: COLORS.muted }}>Conf: <span style={{ color: COLORS.accent }}>{item.confidence}%</span></span>
-          {item.model_score != null && (() => {
-            const eff = Math.max(Math.abs(item.model_score || 0), Math.abs(item.model_score_1h || 0));
-            const using1h = Math.abs(item.model_score_1h || 0) > Math.abs(item.model_score || 0);
-            return (
-              <span style={{ fontSize: 10, color: COLORS.muted }}>
-                Score: <span style={{ color: COLORS.gold }}>{fmtScore(eff)}</span>
-                {using1h && <span style={{ color: COLORS.muted, fontSize: 9 }}> (1h)</span>}
               </span>
             );
           })()}
