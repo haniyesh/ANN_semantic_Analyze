@@ -47,7 +47,7 @@ from sklearn.preprocessing import StandardScaler
 CSV_PATH   = HERE / "news_cleaned_filtered_scored_pre_ensemble.csv"
 CACHE_FILE = HERE / "news_cache.json"
 
-from reduce_noise import (
+from pipeline.reduce_noise import (
     BLOCKED_CHANNELS, NOISE_TITLE_RE, CRYPTO_KW_RE,
     CRYPTO_FILTERED_CHANNELS, passes_news_filter,
 )

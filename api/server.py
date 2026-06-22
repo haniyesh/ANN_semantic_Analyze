@@ -34,7 +34,7 @@ _CHANNEL_NORM = {
     "cryptoslatenews": None,
 }
 
-from reduce_noise import BLOCKED_CHANNELS, passes_news_filter as _passes_news_filter
+from pipeline.reduce_noise import BLOCKED_CHANNELS, passes_news_filter as _passes_news_filter
 
 
 def _passes_noise_filter(item: dict) -> bool:

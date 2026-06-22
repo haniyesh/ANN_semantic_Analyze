@@ -67,7 +67,7 @@ _EMOJI_RE = re.compile(
     flags=re.UNICODE,
 )
 
-from reduce_noise import passes_news_filter
+from pipeline.reduce_noise import passes_news_filter
 
 
 # ── helpers ──────────────────────────────────────────────────────
