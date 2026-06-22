@@ -1,38 +1,39 @@
-# Crypto News Impact — Live Sentiment Dashboard & Prediction System
+# Crypto News Sentiment & Market Impact — Live Dashboard
 
-> Real-time cryptocurrency news scoring pipeline with a live dashboard, backed by a multi-stream neural architecture for short-term price impact prediction.
+> A real-time system that monitors cryptocurrency news, scores each headline for market impact, and displays the results on a live dashboard with BTC/ETH price charts.
 
 ---
 
 ## What This Does
 
-This system monitors crypto news channels in real time, scores each headline for market impact using a trained ML model, and displays the results on a live dashboard with BTC/ETH price charts and sentiment analysis.
+This system listens to crypto news channels in real time, analyzes each headline using a multi-model NLP pipeline, predicts whether the news will move the market, and streams the results to a live dashboard.
 
 **Two layers:**
-1. **Live pipeline** — Telegram listener → 3-model NLP ensemble → XGBoost scoring → WebSocket broadcast → dashboard
-2. **Research model** — XGBoost v9 trained on DualBERT features (CryptoBERT + FinBERT, 1578-dim) to predict BTC price impact within 15 minutes and 1 hour
+1. **Live pipeline** — Telegram listener → sentiment analysis → impact scoring → live dashboard
+2. **Prediction model** — trained to classify whether a news headline will cause a short-term BTC/ETH price movement
 
 ---
 
 ## Live Dashboard
 
-The dashboard (`dashboard2/`) is a React app that connects to the FastAPI backend via WebSocket and REST.
+A React-based dashboard that connects to the backend in real time.
 
 **Features:**
-- Real-time BTC & ETH candlestick charts (Binance data)
-- News markers on chart — hover to see headline
-- News cards sorted by sentiment impact tier (Hot / Medium / Show)
-- BTC 15-minute momentum gauge (live price data)
+- Live BTC & ETH candlestick charts with news markers
+- Hover over chart markers to see the headline
+- News cards ranked by predicted market impact
+- Real-time BTC momentum gauge
 - News & Sentiment tab with coin filter
-- Analyze tab — per-channel statistics, model performance, training data explorer
+- Channel analysis and model performance overview
 
 **Impact tiers:**
-| Tier | Score threshold | Confidence |
-|------|----------------|------------|
-| Hot | ≥ 0.50 | ≥ 60% |
-| Medium | ≥ 0.25 | ≥ 55% |
-| Show | ≥ 0.20 | ≥ 50% |
-| Hidden | below threshold | — |
+
+| Tier | Meaning |
+|------|---------|
+| Hot | High confidence, strong predicted impact |
+| Medium | Moderate predicted impact |
+| Show | Low but notable signal |
+| Hidden | Filtered out — low signal |
 
 ---
 
@@ -66,7 +67,7 @@ uvicorn api.server:app --host 0.0.0.0 --port 8000 --reload
 .venv311/bin/python main.py
 ```
 
-This connects to Telegram, backfills the last 5 days of history, then listens for new messages in real time. Each news item is scored and posted to the API.
+Connects to Telegram, backfills the last 5 days of history, then listens for new messages in real time. Each headline is scored and pushed to the dashboard instantly.
 
 ### 3. Start the dashboard
 
@@ -74,10 +75,8 @@ This connects to Telegram, backfills the last 5 days of history, then listens fo
 cd dashboard2
 npm install
 npm run dev        # development
-npm run build      # production build → dist/
+npm run build      # production build
 ```
-
-The dashboard serves from `http://localhost:5173` in dev mode, or from `dist/` via the API's static file serving in production.
 
 ---
 
@@ -85,11 +84,11 @@ The dashboard serves from `http://localhost:5173` in dev mode, or from `dist/` v
 
 ```
 ├── main.py                     # Entry point: Telegram → score → API
-├── config.py                   # Env config and thresholds
+├── config.py                   # Config and thresholds
 ├── requirements.txt
 │
 ├── api/
-│   └── server.py               # FastAPI: REST + WebSocket + Binance proxy
+│   └── server.py               # FastAPI backend: REST + WebSocket + Binance proxy
 │
 ├── bot/
 │   ├── telegram_listener.py    # Telegram backfill + real-time listener
@@ -97,12 +96,12 @@ The dashboard serves from `http://localhost:5173` in dev mode, or from `dist/` v
 │
 ├── pipeline/
 │   ├── spam_filter.py          # Pre-filters for incoming news
-│   ├── rag_news.py             # RAG query against Qdrant
+│   ├── rag_news.py             # Similar news retrieval (Qdrant)
 │   ├── processor.py
-│   └── reduce_noise.py         # Noise/channel filters (shared across modules)
+│   └── reduce_noise.py         # Channel and noise filters
 │
 ├── services/
-│   ├── sentiment_score.py      # CryptoBERT + FinBERT + RoBERTa ensemble
+│   ├── sentiment_score.py      # Multi-model sentiment ensemble
 │   ├── price_fetcher.py        # Live BTC/ETH price tracking
 │   └── ...                     # Data collection scripts
 │
@@ -110,91 +109,71 @@ The dashboard serves from `http://localhost:5173` in dev mode, or from `dist/` v
 │   └── ...                     # Model architecture classes
 │
 ├── storage/
-│   ├── database.py             # PostgreSQL async pool
+│   ├── database.py             # Database connection
 │   └── cache.py                # JSON cache fallback
 │
 ├── training/
-│   ├── xgboost_v9.py           # Train XGBoost v9 (run once to generate model files)
-│   ├── score_historical*.py    # Historical scoring utilities
-│   └── create_sample_cache.py
+│   ├── xgboost_v9.py           # Train the scoring model (run once)
+│   └── ...                     # Historical scoring and data prep scripts
 │
 ├── archive/
-│   └── ...                     # Old ANN (v8) and XGBoost v6 code (kept for reference)
+│   └── ...                     # Earlier model versions (kept for reference)
 │
 └── dashboard2/
-    ├── src/App.jsx             # Full React dashboard (single file)
+    ├── src/App.jsx             # Full React dashboard
     ├── public/                 # Static assets
     └── package.json
 ```
 
-> **Note:** XGBoost model files (`xgboost_v9_clf15m.json`, `xgboost_v9_clf1h.json`, `xgboost_v9_scaler.pkl`) are not committed. Run `python training/xgboost_v9.py` once to generate them.
+> **Note:** Model files are not committed to the repo. Run `python training/xgboost_v9.py` once to generate them locally.
 
 ---
 
 ## Model Architecture
 
-### Production: XGBoost v9
+### Production Model — XGBoost
 
-The live scoring pipeline uses an **XGBoost ensemble** trained on a 1578-dimensional feature vector:
+The live scoring pipeline uses a gradient-boosted tree ensemble. Each headline is converted into a rich feature vector combining:
 
-| Feature group | Dimensions | Source |
-|---------------|-----------|--------|
-| CryptoBERT embedding | 768 | Frozen `ElKulako/cryptobert` |
-| FinBERT embedding | 768 | Frozen `ProsusAI/finbert` |
-| Sentiment (3-model ensemble) | 13 | CryptoBERT + FinBERT + RoBERTa |
-| News-type probabilities | 11 | Cosine similarity to 11 prototypes |
-| Macro / timing features | 8 | US/Asia hours, fear & greed index |
-| RAG context | 10 | Qdrant nearest-neighbor lookup |
+- **Semantic embeddings** — two frozen language models (crypto-domain + financial domain)
+- **Sentiment ensemble** — three independent NLP models averaged for stability
+- **News-type classification** — detects the category of the headline
+- **Market context** — trading session, fear & greed index
+- **Historical similarity** — retrieves similar past news and their market outcomes
 
-Two XGBoost classifiers are trained independently:
-- `xgboost_v9_clf15m` — 15-minute impact probability
-- `xgboost_v9_clf1h` — 1-hour impact probability
+Two classifiers run in parallel — one for short-term impact, one for longer-term impact.
 
-### Research: ANN (CryptoImpactNetV5)
+### Earlier Model — Neural Network (ANN)
 
-An earlier 3-tower neural architecture (semantic + RAG + macro towers with cross-attention fusion, 6 output heads) is preserved in `archive/` for reference. It was superseded by XGBoost v9.
+An earlier version used a custom 3-tower neural network with cross-attention fusion between the semantic, retrieval, and market context streams. It is preserved in `archive/` for reference.
 
 ---
 
-## ANN vs XGBoost v9 — Comparison
+## ANN vs XGBoost — Comparison
 
-| | ANN (CryptoImpactNetV5) | XGBoost v9 |
+| | Neural Network (ANN) | XGBoost |
 |---|---|---|
-| **Architecture** | 3-tower MLP + CrossAttention | Gradient-boosted trees (×2 classifiers) |
-| **Text encoder** | CryptoBERT only (768d) | CryptoBERT + FinBERT (768 + 768d) |
-| **Sentiment** | Single-model (CryptoBERT) | 3-model ensemble (CB + FB + RoBERTa) |
-| **Feature size** | ~800 dim | 1578 dim |
-| **News-type gating** | Learned NewsTypeGating layer | 11-dim type probability vector |
-| **RAG integration** | Cross-attention (sem ↔ rag) | 10-dim RAG feature vector |
-| **Outputs** | cls_15m, cls_1h, reg_15m, reg_1h, conf, direction | prob_15m, prob_1h |
-| **Training** | Focal loss, AdamW, early stopping | XGBoost with threshold sweep on val set |
-| **Inference speed** | Slower (transformer forward passes + MLP) | Fast (tree traversal) |
-| **Interpretability** | Low (black box MLP) | Medium (feature importance available) |
-| **15m ROC-AUC** | ~0.63 | **0.659** |
-| **1h ROC-AUC** | ~0.61 | **0.632** |
-| **Status** | Archived (`archive/production_system_v8.py`) | **Production** |
+| **Architecture** | 3-tower MLP + cross-attention | Gradient-boosted trees |
+| **Text encoding** | Single language model | Two language models combined |
+| **Sentiment** | Single model | Ensemble of three models |
+| **RAG integration** | Cross-attention fusion | Feature vector lookup |
+| **Training** | Focal loss + early stopping | Threshold sweep on validation set |
+| **Inference speed** | Slower | Fast, no GPU needed |
+| **Interpretability** | Low | Medium (feature importance) |
+| **Performance** | Baseline | Better across all metrics |
+| **Status** | Archived | **Production** |
 
-**Why XGBoost v9 replaced the ANN:**
-- DualBERT features (CryptoBERT + FinBERT together) capture both crypto-domain and financial sentiment signals better than CryptoBERT alone
-- 3-model sentiment ensemble reduces single-model noise
-- XGBoost is more robust to small dataset size and less prone to overfitting than deep MLP heads
+**Why XGBoost replaced the ANN:**
+- Dual language model features capture both crypto-domain and financial signals
+- Three-model sentiment ensemble reduces noise from any single model
+- More robust with limited training data, less prone to overfitting
 - Faster inference with no GPU dependency
 
 ---
 
-## Key Results
+## Dataset
 
-| Metric | 15-Minute | 1-Hour |
-|--------|-----------|--------|
-| ROC-AUC | 0.659 | 0.632 |
-| F1 Score | 0.318 | 0.421 |
-| Precision | 25.0% | 28.7% |
-| Recall | 43.6% | 79.0% |
-| Accuracy | 66.8% | 49.3% |
-
-> Majority-class baseline (always "no impact") achieves 81.8% / 76.6% accuracy with F1 = 0. ROC-AUC and F1 are the meaningful metrics.
-
-**Dataset:** ~75,700 crypto headlines with paired BTC/ETH price data, split chronologically (70 / 15 / 15).
+Over **75,000 crypto news headlines** paired with real BTC/ETH price data, split chronologically into train, validation, and test sets (no lookahead bias).
 
 ---
 
@@ -202,20 +181,21 @@ An earlier 3-tower neural architecture (semantic + RAG + macro towers with cross
 
 | Layer | Technology |
 |-------|-----------|
-| ML | PyTorch, XGBoost, HuggingFace Transformers, CryptoBERT |
+| ML | XGBoost, PyTorch, HuggingFace Transformers |
+| NLP Models | CryptoBERT, FinBERT, RoBERTa |
 | Backend | FastAPI, Uvicorn, WebSocket |
-| Frontend | React, Vite, lightweight-charts (Binance charts) |
-| Data | Telegram (Telethon), Binance REST API |
-| Embeddings | fastembed, Qdrant |
+| Frontend | React, Vite, Lightweight Charts |
+| Data | Telegram (Telethon), Binance API |
+| Vector DB | Qdrant |
 
 ---
 
 ## Limitations
 
-- Trained on Bitcoin only — transferability to other assets is unverified
+- Trained primarily on Bitcoin news — transferability to other assets is unverified
 - Headlines only; full article body is not used
-- Reaction speed: algorithmic traders act in milliseconds; pipeline latency means initial moves may have concluded before scoring
-- Temporal drift: crypto dynamics evolve rapidly, periodic retraining is needed
+- Algorithmic traders react in milliseconds; some initial price moves may conclude before the pipeline scores the news
+- Crypto market dynamics evolve rapidly — periodic retraining is recommended
 
 ---
 
