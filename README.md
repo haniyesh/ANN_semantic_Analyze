@@ -194,7 +194,7 @@ An earlier 3-tower neural architecture (semantic + RAG + macro towers with cross
 
 > Majority-class baseline (always "no impact") achieves 81.8% / 76.6% accuracy with F1 = 0. ROC-AUC and F1 are the meaningful metrics.
 
-**Dataset:** ~31,500 BTC headlines with paired USDT price data, split chronologically (70 / 15 / 15).
+**Dataset:** ~75,700 crypto headlines with paired BTC/ETH price data, split chronologically (70 / 15 / 15).
 
 ---
 
