@@ -156,6 +156,32 @@ An earlier 3-tower neural architecture (semantic + RAG + macro towers with cross
 
 ---
 
+## ANN vs XGBoost v9 — Comparison
+
+| | ANN (CryptoImpactNetV5) | XGBoost v9 |
+|---|---|---|
+| **Architecture** | 3-tower MLP + CrossAttention | Gradient-boosted trees (×2 classifiers) |
+| **Text encoder** | CryptoBERT only (768d) | CryptoBERT + FinBERT (768 + 768d) |
+| **Sentiment** | Single-model (CryptoBERT) | 3-model ensemble (CB + FB + RoBERTa) |
+| **Feature size** | ~800 dim | 1578 dim |
+| **News-type gating** | Learned NewsTypeGating layer | 11-dim type probability vector |
+| **RAG integration** | Cross-attention (sem ↔ rag) | 10-dim RAG feature vector |
+| **Outputs** | cls_15m, cls_1h, reg_15m, reg_1h, conf, direction | prob_15m, prob_1h |
+| **Training** | Focal loss, AdamW, early stopping | XGBoost with threshold sweep on val set |
+| **Inference speed** | Slower (transformer forward passes + MLP) | Fast (tree traversal) |
+| **Interpretability** | Low (black box MLP) | Medium (feature importance available) |
+| **15m ROC-AUC** | ~0.63 | **0.659** |
+| **1h ROC-AUC** | ~0.61 | **0.632** |
+| **Status** | Archived (`archive/production_system_v8.py`) | **Production** |
+
+**Why XGBoost v9 replaced the ANN:**
+- DualBERT features (CryptoBERT + FinBERT together) capture both crypto-domain and financial sentiment signals better than CryptoBERT alone
+- 3-model sentiment ensemble reduces single-model noise
+- XGBoost is more robust to small dataset size and less prone to overfitting than deep MLP heads
+- Faster inference with no GPU dependency
+
+---
+
 ## Key Results
 
 | Metric | 15-Minute | 1-Hour |
