@@ -9,8 +9,8 @@
 This system monitors crypto news channels in real time, scores each headline for market impact using a trained ML model, and displays the results on a live dashboard with BTC/ETH price charts and sentiment analysis.
 
 **Two layers:**
-1. **Live pipeline** — Telegram listener → NLP scoring → WebSocket broadcast → dashboard
-2. **Research model** — Multi-stream neural network trained to predict whether a headline will move BTC price within 15 minutes or 1 hour
+1. **Live pipeline** — Telegram listener → 3-model NLP ensemble → XGBoost scoring → WebSocket broadcast → dashboard
+2. **Research model** — XGBoost v9 trained on DualBERT features (CryptoBERT + FinBERT, 1578-dim) to predict BTC price impact within 15 minutes and 1 hour
 
 ---
 
@@ -57,8 +57,7 @@ BOT_TOKEN=...
 ### 1. Start the API server
 
 ```bash
-cd api
-uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+uvicorn api.server:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### 2. Start the news pipeline
@@ -85,42 +84,75 @@ The dashboard serves from `http://localhost:5173` in dev mode, or from `dist/` v
 ## Project Structure
 
 ```
-├── main.py                     # Main pipeline: score news → POST to API
-├── config.py                   # Env config
+├── main.py                     # Entry point: Telegram → score → API
+├── config.py                   # Env config and thresholds
+├── requirements.txt
+│
 ├── api/
 │   └── server.py               # FastAPI: REST + WebSocket + Binance proxy
+│
 ├── bot/
-│   └── telegram_listener.py    # Telegram backfill + real-time listener
-├── dashboard2/
-│   ├── src/App.jsx             # Full React dashboard
-│   └── public/                 # Static assets
-├── pipeline/                   # NLP scoring modules
-├── services/                   # Data collection utilities
-├── models/                     # Saved model weights
-├── xgboost_v9_*.json           # XGBoost ensemble (15m + 1h classifiers)
-└── requirements.txt
+│   ├── telegram_listener.py    # Telegram backfill + real-time listener
+│   └── telegram_alert.py
+│
+├── pipeline/
+│   ├── spam_filter.py          # Pre-filters for incoming news
+│   ├── rag_news.py             # RAG query against Qdrant
+│   ├── processor.py
+│   └── reduce_noise.py         # Noise/channel filters (shared across modules)
+│
+├── services/
+│   ├── sentiment_score.py      # CryptoBERT + FinBERT + RoBERTa ensemble
+│   ├── price_fetcher.py        # Live BTC/ETH price tracking
+│   └── ...                     # Data collection scripts
+│
+├── models/
+│   └── ...                     # Model architecture classes
+│
+├── storage/
+│   ├── database.py             # PostgreSQL async pool
+│   └── cache.py                # JSON cache fallback
+│
+├── training/
+│   ├── xgboost_v9.py           # Train XGBoost v9 (run once to generate model files)
+│   ├── score_historical*.py    # Historical scoring utilities
+│   └── create_sample_cache.py
+│
+├── archive/
+│   └── ...                     # Old ANN (v8) and XGBoost v6 code (kept for reference)
+│
+└── dashboard2/
+    ├── src/App.jsx             # Full React dashboard (single file)
+    ├── public/                 # Static assets
+    └── package.json
 ```
+
+> **Note:** XGBoost model files (`xgboost_v9_clf15m.json`, `xgboost_v9_clf1h.json`, `xgboost_v9_scaler.pkl`) are not committed. Run `python training/xgboost_v9.py` once to generate them.
 
 ---
 
 ## Model Architecture
 
-The prediction model fuses **four parallel input streams**:
+### Production: XGBoost v9
 
-| Stream | Input |
-|--------|-------|
-| Semantic | CryptoBERT headline embedding (frozen) |
-| Chain-of-Thought | Encoded financial reasoning trace |
-| Historical Context | RAG retrieval summary from similar past events |
-| Contextual | Time of day, volatility, sentiment/category features |
+The live scoring pipeline uses an **XGBoost ensemble** trained on a 1578-dimensional feature vector:
 
-Fused through a shared MLP with six output heads:
-- 2× binary classification (15-min and 1-hour impact)
-- 2× regression (price change magnitude)
-- 1× direction (up / down)
-- 1× confidence (self-estimated reliability)
+| Feature group | Dimensions | Source |
+|---------------|-----------|--------|
+| CryptoBERT embedding | 768 | Frozen `ElKulako/cryptobert` |
+| FinBERT embedding | 768 | Frozen `ProsusAI/finbert` |
+| Sentiment (3-model ensemble) | 13 | CryptoBERT + FinBERT + RoBERTa |
+| News-type probabilities | 11 | Cosine similarity to 11 prototypes |
+| Macro / timing features | 8 | US/Asia hours, fear & greed index |
+| RAG context | 10 | Qdrant nearest-neighbor lookup |
 
-**XGBoost ensemble (v9)** runs on top of the neural embeddings for production scoring.
+Two XGBoost classifiers are trained independently:
+- `xgboost_v9_clf15m` — 15-minute impact probability
+- `xgboost_v9_clf1h` — 1-hour impact probability
+
+### Research: ANN (CryptoImpactNetV5)
+
+An earlier 3-tower neural architecture (semantic + RAG + macro towers with cross-attention fusion, 6 output heads) is preserved in `archive/` for reference. It was superseded by XGBoost v9.
 
 ---
 
