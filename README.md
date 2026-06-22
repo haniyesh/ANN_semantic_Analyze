@@ -1,143 +1,169 @@
-# Multi-Stream Neural Architecture for Cryptocurrency News Impact Prediction
-> Predicting whether a Bitcoin news headline will move the market — within 15 minutes and 1 hour — using a multi-stream neural network with chain-of-thought reasoning.
+# Crypto News Impact — Live Sentiment Dashboard & Prediction System
+
+> Real-time cryptocurrency news scoring pipeline with a live dashboard, backed by a multi-stream neural architecture for short-term price impact prediction.
+
 ---
-## Overview
-This project explores a core question in computational finance: **can a neural network read cryptocurrency news and infer short-term price impact?**
-Given a news headline, the model predicts binary impact labels at two horizons:
-- **15-minute window** (threshold: ±0.3% price change)
-- **1-hour window** (threshold: ±0.5% price change)
-Rather than relying on a single signal, the architecture fuses multiple input streams — semantic text embeddings, chain-of-thought financial reasoning traces, historical-context retrieval, and market-state features — into a shared representation mapped to several output tasks.
+
+## What This Does
+
+This system monitors crypto news channels in real time, scores each headline for market impact using a trained ML model, and displays the results on a live dashboard with BTC/ETH price charts and sentiment analysis.
+
+**Two layers:**
+1. **Live pipeline** — Telegram listener → NLP scoring → WebSocket broadcast → dashboard
+2. **Research model** — Multi-stream neural network trained to predict whether a headline will move BTC price within 15 minutes or 1 hour
+
+---
+
+## Live Dashboard
+
+The dashboard (`dashboard2/`) is a React app that connects to the FastAPI backend via WebSocket and REST.
+
+**Features:**
+- Real-time BTC & ETH candlestick charts (Binance data)
+- News markers on chart — hover to see headline
+- News cards sorted by sentiment impact tier (Hot / Medium / Show)
+- BTC 15-minute momentum gauge (live price data)
+- News & Sentiment tab with coin filter
+- Analyze tab — per-channel statistics, model performance, training data explorer
+
+**Impact tiers:**
+| Tier | Score threshold | Confidence |
+|------|----------------|------------|
+| Hot | ≥ 0.50 | ≥ 60% |
+| Medium | ≥ 0.25 | ≥ 55% |
+| Show | ≥ 0.20 | ≥ 50% |
+| Hidden | below threshold | — |
 
 ---
 
 ## How to Run
 
-### 1. Dashboard (Frontend)
+### Prerequisites
 
 ```bash
-cd dashboard
-npm run dev
+python -m venv .venv311
+source .venv311/bin/activate      # Windows: .venv311\Scripts\activate
+pip install -r requirements.txt
 ```
 
-### 2. API (Backend)
+Copy `.env.example` to `.env` and fill in your credentials:
+```
+TELEGRAM_API_ID=...
+TELEGRAM_API_HASH=...
+TELEGRAM_CHANNELS=channel1,channel2
+BOT_TOKEN=...
+```
+
+### 1. Start the API server
 
 ```bash
 cd api
-python server.py
+uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### 2. Start the news pipeline
+
+```bash
+.venv311/bin/python main.py
+```
+
+This connects to Telegram, backfills the last 5 days of history, then listens for new messages in real time. Each news item is scored and posted to the API.
+
+### 3. Start the dashboard
+
+```bash
+cd dashboard2
+npm install
+npm run dev        # development
+npm run build      # production build → dist/
+```
+
+The dashboard serves from `http://localhost:5173` in dev mode, or from `dist/` via the API's static file serving in production.
+
+---
+
+## Project Structure
+
+```
+├── main.py                     # Main pipeline: score news → POST to API
+├── config.py                   # Env config
+├── api/
+│   └── server.py               # FastAPI: REST + WebSocket + Binance proxy
+├── bot/
+│   └── telegram_listener.py    # Telegram backfill + real-time listener
+├── dashboard2/
+│   ├── src/App.jsx             # Full React dashboard
+│   └── public/                 # Static assets
+├── pipeline/                   # NLP scoring modules
+├── services/                   # Data collection utilities
+├── models/                     # Saved model weights
+├── xgboost_v9_*.json           # XGBoost ensemble (15m + 1h classifiers)
+└── requirements.txt
 ```
 
 ---
 
+## Model Architecture
+
+The prediction model fuses **four parallel input streams**:
+
+| Stream | Input |
+|--------|-------|
+| Semantic | CryptoBERT headline embedding (frozen) |
+| Chain-of-Thought | Encoded financial reasoning trace |
+| Historical Context | RAG retrieval summary from similar past events |
+| Contextual | Time of day, volatility, sentiment/category features |
+
+Fused through a shared MLP with six output heads:
+- 2× binary classification (15-min and 1-hour impact)
+- 2× regression (price change magnitude)
+- 1× direction (up / down)
+- 1× confidence (self-estimated reliability)
+
+**XGBoost ensemble (v9)** runs on top of the neural embeddings for production scoring.
+
+---
+
 ## Key Results
+
 | Metric | 15-Minute | 1-Hour |
-|---|---|---|
+|--------|-----------|--------|
 | ROC-AUC | 0.659 | 0.632 |
 | F1 Score | 0.318 | 0.421 |
 | Precision | 25.0% | 28.7% |
 | Recall | 43.6% | 79.0% |
 | Accuracy | 66.8% | 49.3% |
-> **Note:** The majority-class baseline (always predicting "no impact") achieves 81.8% / 76.6% accuracy while catching **zero** impactful events (F1 = 0). ROC-AUC and F1 are the meaningful metrics here.
+
+> Majority-class baseline (always "no impact") achieves 81.8% / 76.6% accuracy with F1 = 0. ROC-AUC and F1 are the meaningful metrics.
+
+**Dataset:** ~31,500 BTC headlines with paired USDT price data, split chronologically (70 / 15 / 15).
 
 ---
 
-## Architecture
-The model consists of **four parallel processing streams** fused through a learned aggregation step:
-| Stream | Description |
-|---|---|
-| **Semantic stream** | Dense headline embedding from a frozen pre-trained language model (CryptoBERT) |
-| **Chain-of-thought stream** | Encoded reasoning trace articulating the causal news-to-price mechanism |
-| **Historical-context stream** | Retrieval summary from similar past news events (RAG-inspired) |
-| **Contextual stream** | Market-state features: time of day, recent volatility, sentiment/category descriptors |
-Fused representations feed into a shared MLP, which branches into:
-- 2× binary classification heads (15-min and 1-hour impact)
-- 2× regression heads (continuous price change magnitude)
-- 1× direction head (up / down)
-- 1× confidence head (self-estimated prediction reliability)
-Total trainable parameters: **tens of thousands** (text encoder is frozen).
+## Tech Stack
 
----
-
-## Dataset
-- **Source:** Cryptocurrency news headlines from major outlets, paired with BTC/USDT market data
-- **Raw items:** ~70,000 headlines
-- **After filtering:** 31,549 samples
-- **Split:** Chronological (no lookahead bias) — 70 / 15 / 15
-| Split | Samples |
-|---|---|
-| Train | 22,084 |
-| Validation | 4,732 |
-| Test | 4,733 |
-**Class distribution (test set):**
-- 15-min: 18.2% impactful, 81.8% non-impactful
-- 1-hour: 23.4% impactful, 76.6% non-impactful
-
----
-
-## Training
-- **Loss:** Focal Loss (γ=2) for classification heads; MSE for regression; cross-entropy for direction
-- **Optimizer:** AdamW (lr=3e-4, weight decay=1e-3)
-- **Scheduler:** ReduceLROnPlateau (halves LR on plateau)
-- **Early stopping:** patience=20 epochs on validation F1 (15-min head)
-- **Max epochs:** 200
-- **Decision thresholds:** Swept on validation set; optimal range 0.39–0.40 (below 0.5 due to class imbalance)
-
----
-
-## Per-Category Performance (15-Minute Horizon)
-| Category | N | Accuracy |
-|---|---|---|
-| Exchange | 12 | 83% |
-| DeFi | 77 | 77% |
-| Macroeconomic | 148 | 76% |
-| ETF | 137 | 74% |
-| Regulatory | 37 | 73% |
-| Partnership | 99 | 73% |
-| Market Analysis | 94 | 72% |
-| Institutional | 116 | 72% |
-| Mining | 9 | 67% |
-Mining news produced **zero true positives** — likely because mining-related events affect Bitcoin through slow structural mechanisms rather than sharp short-term reactions.
-
----
-
-## Chain-of-Thought Reasoning
-A distinctive feature of this system is the integration of **chain-of-thought (CoT) financial reasoning**. For each headline, the model receives an explicit causal trace linking the news event to an expected market reaction. Example:
-> *"ETF approval increases institutional access to Bitcoin, expanding the buyer base and reducing friction for large capital inflows — likely generating upward price pressure within minutes to hours."*
-CoT reasoning serves two roles:
-1. **Regularization** — grounds predictions in causal mechanisms, reducing false positives on emotionally charged but financially irrelevant language
-2. **Interpretability** — human analysts can inspect the reasoning trace to audit model decisions
+| Layer | Technology |
+|-------|-----------|
+| ML | PyTorch, XGBoost, HuggingFace Transformers, CryptoBERT |
+| Backend | FastAPI, Uvicorn, WebSocket |
+| Frontend | React, Vite, lightweight-charts (Binance charts) |
+| Data | Telegram (Telethon), Binance REST API |
+| Embeddings | fastembed, Qdrant |
 
 ---
 
 ## Limitations
-- **Single asset:** Trained and evaluated on Bitcoin only; transferability to other assets is unverified
-- **Headlines only:** Full article body is not used; important context sometimes lives below the headline
-- **Temporal drift:** Crypto market dynamics evolve rapidly; periodic retraining is likely necessary
-- **Label noise:** Price movements are attributed to the most recent headline, which may not be the true cause
-- **Reaction speed:** Algorithmic traders act in milliseconds; by pipeline ingestion time, initial market reactions may have already concluded
 
----
-
-## Future Work
-- Multi-asset extension (Ethereum, major altcoins)
-- Full article text and social-media signal integration
-- Post-hoc confidence calibration (temperature scaling)
-- Fine-tuned CoT reasoning on expert trader annotations
-
----
-
-## References
-A full reference list is provided in the accompanying paper. Key works include:
-- Focal Loss — Lin et al., ICCV 2017
-- Chain-of-Thought Prompting — Wei et al., NeurIPS 2022
-- Retrieval-Augmented Generation — Lewis et al., NeurIPS 2020
-- CryptoBERT — ElKulako, Hugging Face 2022
-- Multitask Learning — Caruana, Machine Learning 1997
+- Trained on Bitcoin only — transferability to other assets is unverified
+- Headlines only; full article body is not used
+- Reaction speed: algorithmic traders act in milliseconds; pipeline latency means initial moves may have concluded before scoring
+- Temporal drift: crypto dynamics evolve rapidly, periodic retraining is needed
 
 ---
 
 ## Citation
-If you use this work, please cite:
-```
+
+```bibtex
 @article{shakibayi2026multistream,
   title     = {A Multi-Stream Neural Architecture for Short-Term Cryptocurrency Price Impact Prediction from News},
   author    = {Shakibayi Senobari, Haniye},
@@ -145,5 +171,7 @@ If you use this work, please cite:
   institution = {Department of Artificial Intelligence, Bahçeşehir University, Istanbul, Turkey}
 }
 ```
+
 ---
+
 *Department of Artificial Intelligence, Bahçeşehir University, Istanbul, Turkey — 2026*
