@@ -37,7 +37,7 @@ load_dotenv()
 # ══════════════════════════════════════════════════════════════════
 # CONFIG  — mirrors v9.py
 # ══════════════════════════════════════════════════════════════════
-HERE             = Path(__file__).parent
+HERE             = Path(__file__).parent.parent  # project root
 SENTIMENT_CSV    = HERE / "news_cleaned_filtered_scored.csv"
 CRYPTOBERT_CACHE = HERE / "cryptobert_v8_pipeline.npy"
 FINBERT_CACHE    = HERE / "finbert_v9_pipeline.npy"

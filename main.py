@@ -260,7 +260,7 @@ def build_xgb_features(
       CryptoBERT(768) | FinBERT(768) | sentiment(13) | type_probs(11) | macro(8) | RAG(10)
     """
     try:
-        from xgboost_v9 import crypto_news_type_classify
+        from training.xgboost_v9 import crypto_news_type_classify
         type_probs = crypto_news_type_classify(cb_embedding.reshape(1, -1))[0]
     except Exception:
         type_probs = np.zeros(11, dtype=np.float32)
@@ -415,7 +415,7 @@ async def post_hot_to_telegram(payload: dict):
 # INCOMING NEWS FILTERS  (delegated to pipeline.spam_filter)
 # ══════════════════════════════════════════════════════════════════
 from pipeline.spam_filter import passes_pre_filters as _passes_pre_filters
-from reduce_noise import passes_news_filter
+from pipeline.reduce_noise import passes_news_filter
 
 MIN_WEIGHT = 5
 

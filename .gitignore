@@ -37,3 +37,13 @@ telegram_session.session
 
 # Logs
 *.log
+
+# IDE
+.vscode/
+
+# Dashboard build output
+dashboard2/dist/
+
+# Corrupted / temp files
+xgboost_results.json
+xgboost_v9_results.json
