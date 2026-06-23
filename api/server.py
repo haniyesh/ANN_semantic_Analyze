@@ -1170,7 +1170,22 @@ async def analyze_custom(body: dict):
             sent["prob_negative"] = round(avg_neg, 4)
             sent["prob_neutral"]  = round(avg_neu, 4)
         except Exception:
-            sent = _build_sentiment(cb_probs)
+            # Fallback: CryptoBERT only — still use ratio logic, not neutral-wins
+            cb_p = float(cb_probs[2]); cb_n = float(cb_probs[0]); cb_neu = float(cb_probs[1])
+            if cb_p >= cb_n * 1.5:
+                disc = (3 if cb_p-cb_n > 0.50 else 2 if cb_p-cb_n > 0.25 else 1)
+                sent = _build_sentiment(cb_probs)
+                sent["sentiment"] = "positive"
+                sent["sentiment_score"] = disc
+                sent["confidence"] = round(cb_p * 100, 2)
+            elif cb_n >= cb_p * 1.5:
+                disc = -(3 if cb_n-cb_p > 0.50 else 2 if cb_n-cb_p > 0.25 else 1)
+                sent = _build_sentiment(cb_probs)
+                sent["sentiment"] = "negative"
+                sent["sentiment_score"] = disc
+                sent["confidence"] = round(cb_n * 100, 2)
+            else:
+                sent = _build_sentiment(cb_probs)
 
         pub_dt = datetime.now(tz=_tz.utc)
         features = _build_features(cb_emb, fb_emb, sent, pub_dt)
@@ -1216,12 +1231,13 @@ async def analyze_custom(body: dict):
         sent_word = "bullish" if sent["sentiment"] == "positive" else ("bearish" if sent["sentiment"] == "negative" else "neutral")
         type_label = top_type.replace("_", " ")
         try:
-            cb_vote = "bullish" if cb_pos > cb_neg else ("bearish" if cb_neg > cb_pos else "neutral")
-            fb_vote = "bullish" if fb_pos > fb_neg else ("bearish" if fb_neg > fb_pos else "neutral")
-            rb_vote = "bullish" if rb_pos > rb_neg else ("bearish" if rb_neg > rb_pos else "neutral")
-            model_votes = f"CryptoBERT→{cb_vote}, FinBERT→{fb_vote}, RoBERTa→{rb_vote}"
+            def _vote(p, n): return "bullish" if p > n else ("bearish" if n > p else "neutral")
+            votes = [f"CryptoBERT→{_vote(cb_pos,cb_neg)}"]
+            if fb_pos > 0 or fb_neg > 0: votes.append(f"FinBERT→{_vote(fb_pos,fb_neg)}")
+            if rb_pos > 0 or rb_neg > 0: votes.append(f"RoBERTa→{_vote(rb_pos,rb_neg)}")
+            model_votes = ", ".join(votes)
         except Exception:
-            model_votes = "sentiment ensemble"
+            model_votes = "CryptoBERT only"
         explanation = (
             f"Classified as {type_label} news. "
             f"Model votes: {model_votes}. Final: {sent_word} (CryptoBERT weighted 50%). "
@@ -1229,11 +1245,14 @@ async def analyze_custom(body: dict):
         )
 
         try:
-            bert_scores = [
-                {"name": "CryptoBERT", "pos": round(cb_pos*100,1), "neg": round(cb_neg*100,1), "neu": round((1-cb_pos-cb_neg)*100,1), "weight": 50},
-                {"name": "FinBERT",    "pos": round(fb_pos*100,1), "neg": round(fb_neg*100,1), "neu": round((1-fb_pos-fb_neg)*100,1), "weight": 25},
-                {"name": "RoBERTa",    "pos": round(rb_pos*100,1), "neg": round(rb_neg*100,1), "neu": round((1-rb_pos-rb_neg)*100,1), "weight": 25},
-            ]
+            bert_scores = [{"name": "CryptoBERT", "pos": round(cb_pos*100,1), "neg": round(cb_neg*100,1),
+                             "neu": round(max(0,(1-cb_pos-cb_neg))*100,1), "weight": 50}]
+            if fb_pos > 0 or fb_neg > 0:
+                bert_scores.append({"name": "FinBERT", "pos": round(fb_pos*100,1), "neg": round(fb_neg*100,1),
+                                    "neu": round(max(0,(1-fb_pos-fb_neg))*100,1), "weight": 25})
+            if rb_pos > 0 or rb_neg > 0:
+                bert_scores.append({"name": "RoBERTa", "pos": round(rb_pos*100,1), "neg": round(rb_neg*100,1),
+                                    "neu": round(max(0,(1-rb_pos-rb_neg))*100,1), "weight": 25})
         except Exception:
             bert_scores = []
 
