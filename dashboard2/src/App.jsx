@@ -1679,6 +1679,21 @@ function CustomAnalyzer() {
               );
             })()}
 
+            {/* Score summary row */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8, marginBottom: 16 }}>
+              {[
+                ["XGB Score", `${result.model_score_pct}%`, result.model_score >= 0.50 ? COLORS.red : result.model_score >= 0.25 ? "#f97316" : COLORS.muted],
+                ["Confidence", `${result.confidence}%`, COLORS.accent],
+                ["Bullish", `${result.prob_positive}%`, COLORS.green],
+                ["Bearish", `${result.prob_negative}%`, COLORS.red],
+              ].map(([lbl, val, clr]) => (
+                <div key={lbl} style={{ background: COLORS.bg, borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
+                  <div style={{ fontSize: 9, color: COLORS.muted, letterSpacing: 1, marginBottom: 4 }}>{lbl}</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: clr, fontFamily: "monospace" }}>{val}</div>
+                </div>
+              ))}
+            </div>
+
             {/* Per-model BERT scores */}
             {result.bert_scores?.length > 0 && (
               <div style={{ marginBottom: 16 }}>
