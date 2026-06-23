@@ -1662,19 +1662,18 @@ function CustomAnalyzer() {
               const impClr = result.impact === "Hot" ? COLORS.red : result.impact === "Medium" ? "#f97316" : COLORS.muted;
               const sentColor = result.sentiment === "positive" ? COLORS.green : result.sentiment === "negative" ? COLORS.red : COLORS.muted;
               const sentLabel = result.sentiment === "positive" ? "▲ BULLISH" : result.sentiment === "negative" ? "▼ BEARISH" : "● NEUTRAL";
+              const impactLabel = result.impact === "Show"
+                ? (result.news_type?.replace(/_/g, " ") || "Show")
+                : result.impact;
               return (
                 <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 20, flexWrap: "wrap" }}>
                   <div style={{ padding: "10px 24px", borderRadius: 12, border: `2px solid ${impClr}`, background: `${impClr}18`, textAlign: "center" }}>
                     <div style={{ fontSize: 10, color: COLORS.muted, letterSpacing: 1, marginBottom: 4 }}>IMPACT</div>
-                    <div style={{ fontSize: 20, fontWeight: 700, color: impClr }}>{result.impact}</div>
+                    <div style={{ fontSize: 18, fontWeight: 700, color: impClr, textTransform: "capitalize" }}>{impactLabel}</div>
                   </div>
                   <div style={{ padding: "10px 24px", borderRadius: 12, border: `2px solid ${sentColor}`, background: `${sentColor}18`, textAlign: "center" }}>
                     <div style={{ fontSize: 10, color: COLORS.muted, letterSpacing: 1, marginBottom: 4 }}>SENTIMENT</div>
                     <div style={{ fontSize: 20, fontWeight: 700, color: sentColor }}>{sentLabel}</div>
-                  </div>
-                  <div style={{ padding: "10px 24px", borderRadius: 12, border: `1px solid ${COLORS.border2}`, background: COLORS.bg, textAlign: "center" }}>
-                    <div style={{ fontSize: 10, color: COLORS.muted, letterSpacing: 1, marginBottom: 4 }}>CATEGORY</div>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.text, textTransform: "capitalize" }}>{result.news_type?.replace(/_/g, " ")}</div>
                   </div>
                 </div>
               );
