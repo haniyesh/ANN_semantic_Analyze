@@ -1091,7 +1091,7 @@ _analyzer_models = {}   # lazy-loaded on first call
 def _get_analyzer_models():
     if _analyzer_models:
         return _analyzer_models
-    from create_sample_cache import _load_bert_models, _load_xgb
+    from training.create_sample_cache import _load_bert_models, _load_xgb
     print("🔄 Loading BERT + XGBoost models for custom analyzer (CPU)...")
     bert = _load_bert_models(force_cpu=True)
     clf15, _clf1h, scaler, thr15, _thr1h = _load_xgb()
@@ -1113,7 +1113,7 @@ async def analyze_custom(body: dict):
         raise HTTPException(status_code=400, detail="Title too short")
 
     from datetime import datetime, timezone as _tz
-    from create_sample_cache import _encode, _build_sentiment, _build_features
+    from training.create_sample_cache import _encode, _build_sentiment, _build_features
     import numpy as np
 
     try:
@@ -1139,7 +1139,7 @@ async def analyze_custom(body: dict):
                   "Medium" if p15 >= SCORE_MED  else "Show")
         signal = "BUY" if sent["sentiment"] == "positive" else ("SELL" if sent["sentiment"] == "negative" else "NEUTRAL")
 
-        from xgboost_v9 import crypto_news_type_classify
+        from training.xgboost_v9 import crypto_news_type_classify
         type_probs = crypto_news_type_classify(cb_emb.reshape(1, -1))[0]
         TYPE_LABELS = ["regulatory","partnership","product","hack_security","market_move",
                        "macro","adoption","exchange","defi","nft","other"]
