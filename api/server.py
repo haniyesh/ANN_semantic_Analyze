@@ -1126,18 +1126,23 @@ async def analyze_custom(body: dict):
         cb_emb, cb_probs, fb_emb = _encode(bert, title)
 
         # Use full 3-model ensemble for sentiment (same as main.py pipeline)
+        # CryptoBERT gets 50% weight — it's the only crypto-domain model and
+        # correctly interprets macro signals (rate cuts, inflation) for BTC.
+        # FinBERT + RoBERTa share the remaining 50% but use a BTC-framed prompt.
         try:
             from services.sentiment_score import load_models as _load_sent
             sm = _load_sent()
-            fb_raw = sm["fb"](f"Bitcoin crypto market: {title}", truncation=True)[0]
+            btc_ctx = f"Bitcoin price impact: {title}"
+            fb_raw = sm["fb"](btc_ctx, truncation=True)[0]
             fb = {s["label"].lower(): s["score"] for s in fb_raw}
-            rb_raw = sm["rb"](f"BREAKING: {title} #Bitcoin #Crypto", truncation=True)[0]
+            rb_raw = sm["rb"](btc_ctx, truncation=True)[0]
             rb = {s["label"].lower(): s["score"] for s in rb_raw}
             cb_pos, cb_neg = float(cb_probs[2]), float(cb_probs[0])
             fb_pos, fb_neg = fb.get("positive", 0), fb.get("negative", 0)
             rb_pos, rb_neg = rb.get("positive", 0), rb.get("negative", 0)
-            avg_pos = (cb_pos + fb_pos + rb_pos) / 3
-            avg_neg = (cb_neg + fb_neg + rb_neg) / 3
+            # CryptoBERT: 50%, FinBERT: 25%, RoBERTa: 25%
+            avg_pos = cb_pos * 0.5 + fb_pos * 0.25 + rb_pos * 0.25
+            avg_neg = cb_neg * 0.5 + fb_neg * 0.25 + rb_neg * 0.25
             avg_neu = 1 - avg_pos - avg_neg
             if avg_neu > max(avg_pos, avg_neg):
                 ens_sent, ens_conf, ens_disc = "neutral", avg_neu, 0
@@ -1197,13 +1202,20 @@ async def analyze_custom(body: dict):
         except Exception:
             pass
 
-        # Explanation
+        # Explanation with per-model breakdown
         sent_word = "bullish" if sent["sentiment"] == "positive" else ("bearish" if sent["sentiment"] == "negative" else "neutral")
         type_label = top_type.replace("_", " ")
+        try:
+            cb_vote = "bullish" if cb_pos > cb_neg else ("bearish" if cb_neg > cb_pos else "neutral")
+            fb_vote = "bullish" if fb_pos > fb_neg else ("bearish" if fb_neg > fb_pos else "neutral")
+            rb_vote = "bullish" if rb_pos > rb_neg else ("bearish" if rb_neg > rb_pos else "neutral")
+            model_votes = f"CryptoBERT→{cb_vote}, FinBERT→{fb_vote}, RoBERTa→{rb_vote}"
+        except Exception:
+            model_votes = "sentiment ensemble"
         explanation = (
-            f"This headline is classified as {type_label} news. "
-            f"The sentiment ensemble (CryptoBERT + FinBERT + RoBERTa) scored it as {sent_word}. "
-            f"{'The model predicts a meaningful short-term price impact.' if impact in ('Hot','Medium') else 'The model does not predict a strong short-term price impact.'}"
+            f"Classified as {type_label} news. "
+            f"Model votes: {model_votes}. Final: {sent_word} (CryptoBERT weighted 50%). "
+            f"{'Short-term price impact predicted.' if impact in ('Hot','Medium') else 'No strong short-term price impact predicted.'}"
         )
 
         return {
