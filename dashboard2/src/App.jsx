@@ -1587,7 +1587,12 @@ function CustomAnalyzer() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: title.trim() }),
       });
-      if (!res.ok) throw new Error((await res.json()).detail || "Error");
+      if (!res.ok) {
+        const text = await res.text();
+        let detail;
+        try { detail = JSON.parse(text).detail; } catch { detail = text; }
+        throw new Error(detail || `Server error (${res.status})`);
+      }
       setResult(await res.json());
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
@@ -1652,57 +1657,43 @@ function CustomAnalyzer() {
               "{result.title}"
             </div>
 
-            {/* Main badges */}
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
-              <span style={{ padding: "5px 14px", borderRadius: 20, fontSize: 12, fontWeight: 700,
-                background: `${sentClr[result.sentiment]}22`, color: sentClr[result.sentiment] }}>
-                {result.sentiment?.toUpperCase()}
-              </span>
-              <span style={{ padding: "5px 14px", borderRadius: 20, fontSize: 12, fontWeight: 700,
-                background: `${sigClr[result.signal]}22`, color: sigClr[result.signal] }}>
-                {result.signal}
-              </span>
-              <span style={{ padding: "5px 14px", borderRadius: 20, fontSize: 12, fontWeight: 700,
-                background: `${result.impact === "High" ? COLORS.red : COLORS.muted}22`,
-                color: result.impact === "High" ? COLORS.red : COLORS.muted }}>
-                {result.impact} Impact
-              </span>
-              <span style={{ padding: "5px 14px", borderRadius: 20, fontSize: 12, fontWeight: 600,
-                background: COLORS.bg, color: COLORS.muted, textTransform: "capitalize" }}>
-                {result.news_type?.replace("_", " ")}
-              </span>
-            </div>
-
-            {/* Score grid */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
-              {[
-                ["15m Score",   `${result.model_score_pct}%`,  result.model_score >= SCORE_HOT ? COLORS.red : result.model_score >= SCORE_MED ? COLORS.gold : COLORS.muted],
-                ["Confidence",  `${result.confidence}%`,        COLORS.accent],
-                ["Bullish",     `${result.prob_positive}%`,     COLORS.green],
-                ["Bearish",     `${result.prob_negative}%`,     COLORS.red],
-              ].map(([lbl, val, clr]) => (
-                <div key={lbl} style={{ background: COLORS.bg, borderRadius: 8, padding: "10px 12px" }}>
-                  <div style={{ fontSize: 9, color: COLORS.muted, letterSpacing: 1, marginBottom: 4 }}>{lbl.toUpperCase()}</div>
-                  <div style={{ fontSize: 16, fontWeight: 700, color: clr, fontFamily: "monospace" }}>{val}</div>
+            {/* Impact + Sentiment */}
+            {(() => {
+              const impClr = result.impact === "Hot" ? COLORS.red : result.impact === "Medium" ? "#f97316" : COLORS.muted;
+              const sentColor = result.sentiment === "positive" ? COLORS.green : result.sentiment === "negative" ? COLORS.red : COLORS.muted;
+              const sentLabel = result.sentiment === "positive" ? "▲ BULLISH" : result.sentiment === "negative" ? "▼ BEARISH" : "● NEUTRAL";
+              return (
+                <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 20, flexWrap: "wrap" }}>
+                  <div style={{ padding: "10px 24px", borderRadius: 12, border: `2px solid ${impClr}`, background: `${impClr}18`, textAlign: "center" }}>
+                    <div style={{ fontSize: 10, color: COLORS.muted, letterSpacing: 1, marginBottom: 4 }}>IMPACT</div>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: impClr }}>{result.impact}</div>
+                  </div>
+                  <div style={{ padding: "10px 24px", borderRadius: 12, border: `2px solid ${sentColor}`, background: `${sentColor}18`, textAlign: "center" }}>
+                    <div style={{ fontSize: 10, color: COLORS.muted, letterSpacing: 1, marginBottom: 4 }}>SENTIMENT</div>
+                    <div style={{ fontSize: 20, fontWeight: 700, color: sentColor }}>{sentLabel}</div>
+                  </div>
+                  <div style={{ padding: "10px 24px", borderRadius: 12, border: `1px solid ${COLORS.border2}`, background: COLORS.bg, textAlign: "center" }}>
+                    <div style={{ fontSize: 10, color: COLORS.muted, letterSpacing: 1, marginBottom: 4 }}>CATEGORY</div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.text, textTransform: "capitalize" }}>{result.news_type?.replace(/_/g, " ")}</div>
+                  </div>
                 </div>
-              ))}
-            </div>
+              );
+            })()}
 
-            {/* Score bar */}
-            <div style={{ marginTop: 14 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: COLORS.muted, marginBottom: 4 }}>
-                <span>0%</span>
-                <span>Model Score (15m)</span>
-                <span>100%</span>
+            {/* Similar news */}
+            {result.similar?.length > 0 && (
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.accent, marginBottom: 8, letterSpacing: 0.5 }}>📚 Similar Past News</div>
+                {result.similar.slice(0, 3).map((s, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: COLORS.bg, borderRadius: 8, marginBottom: 6 }}>
+                    <span style={{ fontSize: 11, color: COLORS.text, flex: 1, marginRight: 10 }}>{s.title?.slice(0, 80)}{s.title?.length > 80 ? "…" : ""}</span>
+                    <span style={{ fontSize: 11, fontFamily: "monospace", fontWeight: 700, color: s.change >= 0 ? COLORS.green : COLORS.red, flexShrink: 0 }}>
+                      BTC {s.change >= 0 ? "+" : ""}{s.change?.toFixed(2)}%
+                    </span>
+                  </div>
+                ))}
               </div>
-              <div style={{ background: COLORS.bg, borderRadius: 4, height: 8, overflow: "hidden" }}>
-                <div style={{
-                  width: `${result.model_score_pct}%`, height: "100%", borderRadius: 4,
-                  background: result.model_score >= SCORE_HOT ? COLORS.red : result.model_score >= SCORE_MED ? COLORS.gold : COLORS.accent,
-                  transition: "width 0.4s ease",
-                }} />
-              </div>
-            </div>
+            )}
           </div>
         )}
       </div>
