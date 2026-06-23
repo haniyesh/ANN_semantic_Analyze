@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-ROOT = Path(__file__).parent
+ROOT = Path(__file__).parent.parent  # project root
 sys.path.insert(0, str(ROOT))
 
 TRAINING_CSV = ROOT / "news_cleaned_filtered_scored.csv"
@@ -111,7 +111,7 @@ def _build_sentiment(cb_probs: np.ndarray) -> dict:
 
 
 def _build_features(cb_emb, fb_emb, sent: dict, pub_dt: datetime) -> np.ndarray:
-    from xgboost_v9 import crypto_news_type_classify
+    from training.xgboost_v9 import crypto_news_type_classify
     type_probs = crypto_news_type_classify(cb_emb.reshape(1, -1))[0]
 
     sent_vec = np.array([
