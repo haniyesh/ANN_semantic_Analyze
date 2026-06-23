@@ -1645,7 +1645,7 @@ function CustomAnalyzer() {
         {/* Loading hint */}
         {loading && (
           <div style={{ marginTop: 12, color: COLORS.muted, fontSize: 11 }}>
-            First run loads BERT models (~30s). Subsequent runs are fast.
+            Please wait...
           </div>
         )}
 
