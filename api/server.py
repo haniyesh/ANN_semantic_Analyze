@@ -1176,6 +1176,36 @@ async def analyze_custom(body: dict):
                        "macro","adoption","exchange","defi","nft","other"]
         top_type = TYPE_LABELS[int(np.argmax(type_probs))]
 
+        # RAG — find similar past news
+        similar = []
+        try:
+            from pipeline.rag_news import query_single
+            now_ts = int(pub_dt.timestamp())
+            rag_result = query_single(title=title, before_timestamp=now_ts,
+                                      channel_impact_rates={}, macro_now={})
+            similar = [
+                {"title": s.get("title",""), "change": s.get("btc_change_15m", 0.0), "sim": s.get("similarity_score", 0.0)}
+                for s in rag_result.get("similar_news", [])[:3]
+            ]
+            rag_features = rag_result["features"]
+            features = _build_features(cb_emb, fb_emb, sent, pub_dt)
+            features  = np.concatenate([features, rag_features]).astype(np.float32)
+            X    = scaler.transform(features.reshape(1, -1)).astype(np.float32)
+            p15  = float(clf15.predict_proba(X)[0, 1])
+            pred = int(p15 >= thr15)
+            impact = ("Hot" if p15 >= SCORE_HOT else "Medium" if p15 >= SCORE_MED else "Show")
+        except Exception:
+            pass
+
+        # Explanation
+        sent_word = "bullish" if sent["sentiment"] == "positive" else ("bearish" if sent["sentiment"] == "negative" else "neutral")
+        type_label = top_type.replace("_", " ")
+        explanation = (
+            f"This headline is classified as {type_label} news. "
+            f"The sentiment ensemble (CryptoBERT + FinBERT + RoBERTa) scored it as {sent_word}. "
+            f"{'The model predicts a meaningful short-term price impact.' if impact in ('Hot','Medium') else 'The model does not predict a strong short-term price impact.'}"
+        )
+
         return {
             "title":          title,
             "sentiment":      sent["sentiment"],
@@ -1193,6 +1223,8 @@ async def analyze_custom(body: dict):
                               "prob_neutral": sent["prob_neutral"], "channel": "live"}),
             "signal":         signal,
             "news_type":      top_type,
+            "similar":        similar,
+            "explanation":    explanation,
         }
     except Exception as e:
         from fastapi import HTTPException

@@ -1679,15 +1679,23 @@ function CustomAnalyzer() {
               );
             })()}
 
+            {/* Explanation */}
+            {result.explanation && (
+              <div style={{ marginBottom: 16, padding: "12px 14px", background: COLORS.bg, borderRadius: 10, borderLeft: `3px solid ${COLORS.accent}` }}>
+                <div style={{ fontSize: 10, color: COLORS.accent, fontWeight: 700, letterSpacing: 1, marginBottom: 6 }}>WHY THIS SCORE?</div>
+                <div style={{ fontSize: 12, color: COLORS.text, lineHeight: 1.6 }}>{result.explanation}</div>
+              </div>
+            )}
+
             {/* Similar news */}
             {result.similar?.length > 0 && (
               <div>
-                <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.accent, marginBottom: 8, letterSpacing: 0.5 }}>📚 Similar Past News</div>
+                <div style={{ fontSize: 10, fontWeight: 700, color: COLORS.accent, marginBottom: 8, letterSpacing: 1 }}>SIMILAR PAST NEWS</div>
                 {result.similar.slice(0, 3).map((s, i) => (
-                  <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: COLORS.bg, borderRadius: 8, marginBottom: 6 }}>
-                    <span style={{ fontSize: 11, color: COLORS.text, flex: 1, marginRight: 10 }}>{s.title?.slice(0, 80)}{s.title?.length > 80 ? "…" : ""}</span>
-                    <span style={{ fontSize: 11, fontFamily: "monospace", fontWeight: 700, color: s.change >= 0 ? COLORS.green : COLORS.red, flexShrink: 0 }}>
-                      BTC {s.change >= 0 ? "+" : ""}{s.change?.toFixed(2)}%
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 12px", background: COLORS.bg, borderRadius: 8, marginBottom: 6 }}>
+                    <span style={{ fontSize: 12, color: COLORS.text, flex: 1, marginRight: 12, lineHeight: 1.4 }}>{s.title?.slice(0, 90)}{s.title?.length > 90 ? "…" : ""}</span>
+                    <span style={{ fontSize: 12, fontFamily: "monospace", fontWeight: 700, color: s.change >= 0 ? COLORS.green : COLORS.red, flexShrink: 0 }}>
+                      {s.change >= 0 ? "+" : ""}{s.change?.toFixed(2)}%
                     </span>
                   </div>
                 ))}
