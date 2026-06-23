@@ -2322,7 +2322,6 @@ export default function CryptoDashboard() {
   const navItems = [
     { icon: <NavIcon d={["M3 3v18h18", "M7 16l4-4 4 4 4-8"]} />, label: "Dashboard" },
     { icon: <NavIcon d={["M4 22h16a2 2 0 002-2V4a2 2 0 00-2-2H8L4 6v14a2 2 0 002 2z", "M8 2v4H4", "M12 12h4", "M12 16h4", "M8 12h.01", "M8 16h.01"]} />, label: "News & Sentiment" },
-    { icon: <NavIcon d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18" />, label: "Analyze" },
     ...(isAdmin ? [
       { icon: <NavIcon d="M12 2a4 4 0 014 4c0 1.5-.8 2.8-2 3.5V12h2a2 2 0 012 2v6H6v-6a2 2 0 012-2h2V9.5C8.8 8.8 8 7.5 8 6a4 4 0 014-4z" />, label: "Model Analysis" },
       { icon: <NavIcon d={["M18 20V10", "M12 20V4", "M6 20v-6"]} />, label: "Training Data" },
