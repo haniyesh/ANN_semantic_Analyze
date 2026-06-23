@@ -1125,10 +1125,15 @@ async def analyze_custom(body: dict):
 
         cb_emb, cb_probs, fb_emb = _encode(bert, title)
 
-        # Use full 3-model ensemble for sentiment (same as main.py pipeline)
-        # CryptoBERT gets 50% weight — it's the only crypto-domain model and
-        # correctly interprets macro signals (rate cuts, inflation) for BTC.
-        # FinBERT + RoBERTa share the remaining 50% but use a BTC-framed prompt.
+        # Initialize per-model variables so bert_scores block always has them
+        cb_pos = float(cb_probs[2]); cb_neg = float(cb_probs[0])
+        fb_pos = fb_neg = rb_pos = rb_neg = 0.0
+
+        # Use full 3-model ensemble for sentiment.
+        # CryptoBERT gets 50% weight — only crypto-domain model.
+        # Direction is judged by pos vs neg ratio, ignoring neutral mass so that
+        # factual-but-bullish headlines ("record inflows", "ETF approved") aren't
+        # silently swallowed into neutral.
         try:
             from services.sentiment_score import load_models as _load_sent
             sm = _load_sent()
@@ -1137,21 +1142,26 @@ async def analyze_custom(body: dict):
             fb = {s["label"].lower(): s["score"] for s in fb_raw}
             rb_raw = sm["rb"](btc_ctx, truncation=True)[0]
             rb = {s["label"].lower(): s["score"] for s in rb_raw}
-            cb_pos, cb_neg = float(cb_probs[2]), float(cb_probs[0])
             fb_pos, fb_neg = fb.get("positive", 0), fb.get("negative", 0)
             rb_pos, rb_neg = rb.get("positive", 0), rb.get("negative", 0)
             # CryptoBERT: 50%, FinBERT: 25%, RoBERTa: 25%
             avg_pos = cb_pos * 0.5 + fb_pos * 0.25 + rb_pos * 0.25
             avg_neg = cb_neg * 0.5 + fb_neg * 0.25 + rb_neg * 0.25
-            avg_neu = 1 - avg_pos - avg_neg
-            if avg_neu > max(avg_pos, avg_neg):
+            avg_neu = max(0.0, 1 - avg_pos - avg_neg)
+            # Judge direction by pos-vs-neg ratio, not by neutral mass.
+            # Neutral only when pos and neg are nearly equal (ratio < 1.5x).
+            if avg_pos == 0 and avg_neg == 0:
                 ens_sent, ens_conf, ens_disc = "neutral", avg_neu, 0
-            else:
+            elif avg_pos >= avg_neg * 1.5:
                 net = avg_pos - avg_neg
-                ens_disc = (3 if net > 0.50 else 2 if net > 0.25 else 1 if net > 0.05 else
-                           -3 if net < -0.50 else -2 if net < -0.25 else -1 if net < -0.05 else 0)
-                ens_sent = "positive" if ens_disc > 0 else ("negative" if ens_disc < 0 else "neutral")
-                ens_conf = avg_pos if ens_disc > 0 else (avg_neg if ens_disc < 0 else avg_neu)
+                ens_disc = (3 if net > 0.50 else 2 if net > 0.25 else 1 if net > 0.05 else 1)
+                ens_sent, ens_conf = "positive", avg_pos
+            elif avg_neg >= avg_pos * 1.5:
+                net = avg_neg - avg_pos
+                ens_disc = -(3 if net > 0.50 else 2 if net > 0.25 else 1 if net > 0.05 else 1)
+                ens_sent, ens_conf = "negative", avg_neg
+            else:
+                ens_sent, ens_conf, ens_disc = "neutral", avg_neu, 0
             sent = _build_sentiment(cb_probs)
             sent["sentiment"] = ens_sent
             sent["sentiment_score"] = ens_disc
