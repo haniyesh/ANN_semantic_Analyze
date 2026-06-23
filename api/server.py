@@ -1218,6 +1218,15 @@ async def analyze_custom(body: dict):
             f"{'Short-term price impact predicted.' if impact in ('Hot','Medium') else 'No strong short-term price impact predicted.'}"
         )
 
+        try:
+            bert_scores = [
+                {"name": "CryptoBERT", "pos": round(cb_pos*100,1), "neg": round(cb_neg*100,1), "neu": round((1-cb_pos-cb_neg)*100,1), "weight": 50},
+                {"name": "FinBERT",    "pos": round(fb_pos*100,1), "neg": round(fb_neg*100,1), "neu": round((1-fb_pos-fb_neg)*100,1), "weight": 25},
+                {"name": "RoBERTa",    "pos": round(rb_pos*100,1), "neg": round(rb_neg*100,1), "neu": round((1-rb_pos-rb_neg)*100,1), "weight": 25},
+            ]
+        except Exception:
+            bert_scores = []
+
         return {
             "title":          title,
             "sentiment":      sent["sentiment"],
@@ -1237,6 +1246,7 @@ async def analyze_custom(body: dict):
             "news_type":      top_type,
             "similar":        similar,
             "explanation":    explanation,
+            "bert_scores":    bert_scores,
         }
     except Exception as e:
         from fastapi import HTTPException

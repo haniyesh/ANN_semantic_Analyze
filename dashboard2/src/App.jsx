@@ -1679,6 +1679,45 @@ function CustomAnalyzer() {
               );
             })()}
 
+            {/* Per-model BERT scores */}
+            {result.bert_scores?.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: COLORS.accent, letterSpacing: 1, marginBottom: 8 }}>SENTIMENT BY MODEL</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {result.bert_scores.map((m) => {
+                    const vote = m.pos > m.neg ? "positive" : m.neg > m.pos ? "negative" : "neutral";
+                    const voteClr = vote === "positive" ? COLORS.green : vote === "negative" ? COLORS.red : COLORS.muted;
+                    const barMax = Math.max(m.pos, m.neg, m.neu);
+                    return (
+                      <div key={m.name} style={{ background: COLORS.bg, borderRadius: 10, padding: "10px 14px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                          <span style={{ fontSize: 12, fontWeight: 700, color: COLORS.text }}>{m.name}</span>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                            <span style={{ fontSize: 10, color: COLORS.muted }}>weight {m.weight}%</span>
+                            <span style={{ fontSize: 11, fontWeight: 700, color: voteClr, padding: "2px 8px", borderRadius: 6, background: `${voteClr}18` }}>
+                              {vote === "positive" ? "▲ BULLISH" : vote === "negative" ? "▼ BEARISH" : "● NEUTRAL"}
+                            </span>
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          {[["Bullish", m.pos, COLORS.green], ["Bearish", m.neg, COLORS.red], ["Neutral", m.neu, COLORS.muted]].map(([lbl, val, clr]) => (
+                            <div key={lbl} style={{ flex: 1 }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: COLORS.muted, marginBottom: 3 }}>
+                                <span>{lbl}</span><span style={{ color: clr, fontWeight: 600 }}>{val}%</span>
+                              </div>
+                              <div style={{ background: COLORS.border2, borderRadius: 3, height: 4 }}>
+                                <div style={{ width: `${Math.min(100, val)}%`, height: "100%", borderRadius: 3, background: clr, opacity: val === barMax ? 1 : 0.45 }} />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Explanation */}
             {result.explanation && (
               <div style={{ marginBottom: 16, padding: "12px 14px", background: COLORS.bg, borderRadius: 10, borderLeft: `3px solid ${COLORS.accent}` }}>
