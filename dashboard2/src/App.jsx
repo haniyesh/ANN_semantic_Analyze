@@ -591,16 +591,17 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
   );
 }
 
-function SentimentGauge({ news }) {
+function SentimentGauge({ news, symbol = "BTCUSDT" }) {
   const [momentum, setMomentum] = useState(null); // { change, open, close }
+  const coinLabel = symbol.startsWith("ETH") ? "ETH" : "BTC";
 
   useEffect(() => {
+    setMomentum(null);
     const fetchMomentum = async () => {
       try {
-        const res = await fetch(`${API_BASE}/proxy/klines?symbol=BTCUSDT&interval=15m&limit=2`);
+        const res = await fetch(`${API_BASE}/proxy/klines?symbol=${symbol}&interval=15m&limit=2`);
         const data = await res.json();
         if (data && data.length >= 2) {
-          const prev  = data[data.length - 2];
           const curr  = data[data.length - 1];
           const open  = parseFloat(curr[1]);
           const close = parseFloat(curr[4]);
@@ -612,7 +613,7 @@ function SentimentGauge({ news }) {
     fetchMomentum();
     const iv = setInterval(fetchMomentum, 30_000);
     return () => clearInterval(iv);
-  }, []);
+  }, [symbol]);
 
   // Map price change to gauge value: ±3% → 0–100
   const MAX_CHANGE = 3;
@@ -630,7 +631,7 @@ function SentimentGauge({ news }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
       <div style={{ display: "flex", justifyContent: "space-between", width: "100%", alignItems: "center" }}>
-        <span style={{ fontSize: 10, fontWeight: 600, color: COLORS.text }}>BTC 15m Momentum</span>
+        <span style={{ fontSize: 10, fontWeight: 600, color: COLORS.text }}>{coinLabel} 15m Momentum</span>
         <span style={{ fontSize: 9, color: ready ? color : COLORS.muted, fontFamily: "monospace", fontWeight: 700 }}>
           {changeStr}
         </span>
@@ -2404,7 +2405,7 @@ export default function CryptoDashboard() {
           </div>
         </div>
         <div style={{ padding: "14px 12px", borderTop: `1px solid ${COLORS.border}` }}>
-          <SentimentGauge news={allNews} />
+          <SentimentGauge news={allNews} symbol={selectedSymbol} />
         </div>
       </div>
 
