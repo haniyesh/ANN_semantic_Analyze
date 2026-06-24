@@ -1,0 +1,282 @@
+[
+  {
+    "id": 1,
+    "title": "BlackRock Bitcoin ETF sees record $1.2 billion inflows in a single day",
+    "label": "positive",
+    "category": "institutional",
+    "notes": "Record inflows = strong institutional buying = bullish"
+  },
+  {
+    "id": 2,
+    "title": "US SEC approves first spot Bitcoin ETF applications",
+    "label": "positive",
+    "category": "regulatory",
+    "notes": "Long-awaited approval = major bullish catalyst"
+  },
+  {
+    "id": 3,
+    "title": "Federal Reserve signals potential rate cut in September amid cooling inflation",
+    "label": "positive",
+    "category": "macro",
+    "notes": "Rate cut = more liquidity = bullish for risk assets including crypto"
+  },
+  {
+    "id": 4,
+    "title": "US Congress passes CLARITY Act giving crypto full regulatory framework",
+    "label": "positive",
+    "category": "regulatory",
+    "notes": "Legal clarity = institutional confidence = bullish"
+  },
+  {
+    "id": 5,
+    "title": "MicroStrategy announces purchase of 21,000 additional Bitcoin worth $2.1 billion",
+    "label": "positive",
+    "category": "institutional",
+    "notes": "Large institutional buy = direct demand = bullish"
+  },
+  {
+    "id": 6,
+    "title": "Bitcoin reaches new all-time high above $100,000",
+    "label": "positive",
+    "category": "market_move",
+    "notes": "ATH = strong upward momentum"
+  },
+  {
+    "id": 7,
+    "title": "El Salvador makes Bitcoin legal tender in landmark decision",
+    "label": "positive",
+    "category": "adoption",
+    "notes": "Country-level adoption = bullish for long term"
+  },
+  {
+    "id": 8,
+    "title": "PayPal enables Bitcoin payments for all US merchants",
+    "label": "positive",
+    "category": "adoption",
+    "notes": "Mass payment adoption = bullish"
+  },
+  {
+    "id": 9,
+    "title": "Bitcoin mining hashrate hits new record high showing network strength",
+    "label": "positive",
+    "category": "network",
+    "notes": "Higher hashrate = stronger network security = positive signal"
+  },
+  {
+    "id": 10,
+    "title": "Spot Bitcoin ETF cumulative inflows surpass $50 billion milestone",
+    "label": "positive",
+    "category": "institutional",
+    "notes": "Sustained institutional demand = bullish"
+  },
+  {
+    "id": 11,
+    "title": "Major exchange Binance hacked, $500 million in crypto stolen",
+    "label": "negative",
+    "category": "hack",
+    "notes": "Major hack = trust crisis = bearish"
+  },
+  {
+    "id": 12,
+    "title": "China bans all cryptocurrency transactions and mining",
+    "label": "negative",
+    "category": "regulatory",
+    "notes": "Total ban from large market = bearish"
+  },
+  {
+    "id": 13,
+    "title": "FTX exchange collapses, files for bankruptcy amid fraud allegations",
+    "label": "negative",
+    "category": "exchange",
+    "notes": "Exchange collapse = systemic risk = strongly bearish"
+  },
+  {
+    "id": 14,
+    "title": "SEC sues Coinbase alleging it operates as unregistered securities exchange",
+    "label": "negative",
+    "category": "regulatory",
+    "notes": "Regulatory attack on leading exchange = bearish"
+  },
+  {
+    "id": 15,
+    "title": "Bitcoin drops 20% as Federal Reserve raises interest rates to 5.5%",
+    "label": "negative",
+    "category": "macro",
+    "notes": "Rate hike + price drop = bearish"
+  },
+  {
+    "id": 16,
+    "title": "Tether loses dollar peg, USDT drops to $0.87 sparking panic",
+    "label": "negative",
+    "category": "stablecoin",
+    "notes": "Stablecoin depeg = market panic = strongly bearish"
+  },
+  {
+    "id": 17,
+    "title": "US Treasury imposes sanctions on crypto mixer Tornado Cash",
+    "label": "negative",
+    "category": "regulatory",
+    "notes": "Government sanctions on crypto tool = bearish"
+  },
+  {
+    "id": 18,
+    "title": "Bitcoin whale moves 50,000 BTC to exchange sparking selloff fears",
+    "label": "negative",
+    "category": "market_move",
+    "notes": "Large exchange inflow = potential dump = bearish signal"
+  },
+  {
+    "id": 19,
+    "title": "DeFi protocol suffers $320 million exploit through reentrancy attack",
+    "label": "negative",
+    "category": "hack",
+    "notes": "Large DeFi hack = trust damage = bearish"
+  },
+  {
+    "id": 20,
+    "title": "Bitcoin miner Celsius Network files for bankruptcy after liquidity crisis",
+    "label": "negative",
+    "category": "exchange",
+    "notes": "Crypto lender collapse = contagion risk = bearish"
+  },
+  {
+    "id": 21,
+    "title": "Bitcoin price consolidates between $60,000 and $62,000 for third week",
+    "label": "neutral",
+    "category": "market_move",
+    "notes": "Sideways consolidation = neutral"
+  },
+  {
+    "id": 22,
+    "title": "Crypto trading volumes remain steady as markets await Fed decision",
+    "label": "neutral",
+    "category": "macro",
+    "notes": "Wait-and-see = neutral"
+  },
+  {
+    "id": 23,
+    "title": "Bitcoin Lightning Network adds 10,000 new nodes this quarter",
+    "label": "neutral",
+    "category": "network",
+    "notes": "Network growth = mildly positive but not immediate price impact"
+  },
+  {
+    "id": 24,
+    "title": "Ethereum completes routine software upgrade with no major issues",
+    "label": "neutral",
+    "category": "network",
+    "notes": "Expected upgrade going smoothly = neutral"
+  },
+  {
+    "id": 25,
+    "title": "Bitcoin dominance holds steady at 52% as altcoins trade sideways",
+    "label": "neutral",
+    "category": "market_move",
+    "notes": "Flat dominance and sideways alts = neutral"
+  },
+  {
+    "id": 26,
+    "title": "Crypto exchange Kraken reports record trading volume in Q2",
+    "label": "neutral",
+    "category": "exchange",
+    "notes": "High volume can be either direction, no clear price signal"
+  },
+  {
+    "id": 27,
+    "title": "Bitcoin mining difficulty adjusts upward by 3% at latest epoch",
+    "label": "neutral",
+    "category": "network",
+    "notes": "Routine difficulty adjustment = neutral"
+  },
+  {
+    "id": 28,
+    "title": "Analysts divided on Bitcoin outlook heading into year-end",
+    "label": "neutral",
+    "category": "opinion",
+    "notes": "Mixed analyst opinion = neutral"
+  },
+  {
+    "id": 29,
+    "title": "Fidelity launches Bitcoin custody service for institutional clients",
+    "label": "positive",
+    "category": "institutional",
+    "notes": "Major TradFi player entering crypto custody = bullish"
+  },
+  {
+    "id": 30,
+    "title": "Bitcoin ETF sees record $500 million single-day outflow",
+    "label": "negative",
+    "category": "institutional",
+    "notes": "Large outflow = institutional selling = bearish"
+  },
+  {
+    "id": 31,
+    "title": "IMF warns Bitcoin poses systemic risk to developing economies",
+    "label": "negative",
+    "category": "regulatory",
+    "notes": "IMF warning = potential for restrictive policies = bearish"
+  },
+  {
+    "id": 32,
+    "title": "Bitcoin spot ETF approved in Hong Kong opening Asian institutional market",
+    "label": "positive",
+    "category": "regulatory",
+    "notes": "New market access = more demand = bullish"
+  },
+  {
+    "id": 33,
+    "title": "US inflation data comes in higher than expected at 4.2%",
+    "label": "negative",
+    "category": "macro",
+    "notes": "High inflation = likely rate hike = bearish for risk assets"
+  },
+  {
+    "id": 34,
+    "title": "Bitcoin halving completed, block reward reduced from 6.25 to 3.125 BTC",
+    "label": "positive",
+    "category": "network",
+    "notes": "Supply reduction event historically bullish"
+  },
+  {
+    "id": 35,
+    "title": "Bitcoin developer conference announces no major protocol changes planned",
+    "label": "neutral",
+    "category": "network",
+    "notes": "Status quo maintained = neutral"
+  },
+  {
+    "id": 36,
+    "title": "Galaxy Digital acquires crypto market maker for $1.2 billion",
+    "label": "positive",
+    "category": "institutional",
+    "notes": "Institutional consolidation shows confidence = mildly bullish"
+  },
+  {
+    "id": 37,
+    "title": "North Korea linked hackers steal $600 million from crypto bridge",
+    "label": "negative",
+    "category": "hack",
+    "notes": "State-level hack = trust damage + liquidity risk = bearish"
+  },
+  {
+    "id": 38,
+    "title": "Bitcoin options open interest hits record $25 billion ahead of expiry",
+    "label": "neutral",
+    "category": "market_move",
+    "notes": "High OI = volatility expected but direction uncertain = neutral"
+  },
+  {
+    "id": 39,
+    "title": "Warren Buffett calls Bitcoin rat poison squared in annual letter",
+    "label": "negative",
+    "category": "opinion",
+    "notes": "High-profile criticism from influential figure = mildly bearish sentiment"
+  },
+  {
+    "id": 40,
+    "title": "Japan officially recognizes Bitcoin as legal payment method",
+    "label": "positive",
+    "category": "regulatory",
+    "notes": "Country-level legal recognition = adoption = bullish"
+  }
+]
