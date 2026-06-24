@@ -16,6 +16,10 @@
         from { opacity: 0; transform: translateY(6px); }
         to   { opacity: 1; transform: translateY(0); }
       }
+      @keyframes chartPulse {
+        0%, 100% { opacity: 0.4; transform: scaleY(0.85); }
+        50%       { opacity: 1;   transform: scaleY(1); }
+      }
       body { background: #050810; }
     </style>
   </head>

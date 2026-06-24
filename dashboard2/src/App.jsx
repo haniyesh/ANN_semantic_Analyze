@@ -535,11 +535,34 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
       {loading && (
         <div style={{
           position: "absolute", inset: 0, zIndex: 5,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          background: COLORS.bg, gap: 10,
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+          background: "rgba(5,8,16,0.92)", backdropFilter: "blur(8px)", gap: 24,
         }}>
-          <div style={{ width: 18, height: 18, border: `2px solid ${COLORS.border2}`, borderTopColor: COLORS.accent, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-          <span style={{ fontSize: 12, color: COLORS.muted, fontFamily: "monospace" }}>Loading chart…</span>
+          {/* Animated candlestick bars */}
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 5, height: 48 }}>
+            {[
+              { h: 28, wickT: 8, wickB: 6, color: COLORS.green, delay: "0s" },
+              { h: 18, wickT: 5, wickB: 4, color: COLORS.red,   delay: "0.12s" },
+              { h: 34, wickT: 10, wickB: 7, color: COLORS.green, delay: "0.24s" },
+              { h: 22, wickT: 6, wickB: 5, color: COLORS.red,   delay: "0.36s" },
+              { h: 30, wickT: 9, wickB: 8, color: COLORS.green, delay: "0.48s" },
+              { h: 16, wickT: 4, wickB: 3, color: COLORS.red,   delay: "0.60s" },
+              { h: 38, wickT: 12, wickB: 9, color: COLORS.accent, delay: "0.72s" },
+            ].map((c, i) => (
+              <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", animation: `chartPulse 1.2s ease-in-out ${c.delay} infinite` }}>
+                <div style={{ width: 2, height: c.wickT, background: c.color, opacity: 0.5, borderRadius: 1 }} />
+                <div style={{ width: 10, height: c.h, background: `linear-gradient(180deg, ${c.color}cc, ${c.color}55)`, borderRadius: 2, border: `1px solid ${c.color}80`, boxShadow: `0 0 8px ${c.color}40` }} />
+                <div style={{ width: 2, height: c.wickB, background: c.color, opacity: 0.5, borderRadius: 1 }} />
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ width: 8, height: 8, borderRadius: "50%", background: COLORS.accent, boxShadow: COLORS.accentGlow, animation: "pulse 1.2s ease-in-out infinite" }} />
+              <span style={{ fontSize: 13, color: COLORS.text, fontWeight: 500, letterSpacing: 0.3 }}>Loading chart</span>
+            </div>
+            <span style={{ fontSize: 11, color: COLORS.muted, fontFamily: "monospace" }}>Fetching price data from Binance…</span>
+          </div>
         </div>
       )}
       <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
