@@ -6,9 +6,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Crypto Sentiment Dashboard</title>
     <style>
-      /* Hide all scrollbars globally — cleaner dark UI look */
       * { scrollbar-width: none; -ms-overflow-style: none; }
       *::-webkit-scrollbar { display: none; }
+      @keyframes pulse {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.5; transform: scale(0.85); }
+      }
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(6px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+      body { background: #050810; }
     </style>
   </head>
   <body>

@@ -11,20 +11,27 @@ const toLocalDate = (ts) => {                            // unix seconds → loc
 };
 
 const COLORS = {
-  bg: "#080b10",
-  panel: "#0d1117",
-  border: "#161c26",
-  border2: "#1e2830",
-  accent: "#00d4aa",
-  accentDim: "#003d30",
-  gold: "#f59e0b",
-  red: "#ef4444",
-  green: "#22c55e",
-  blue: "#3b82f6",
-  purple: "#a855f7",
-  text: "#e2e8f0",
-  muted: "#64748b",
-  muted2: "#334155",
+  bg:        "#050810",
+  panel:     "#080c14",
+  card:      "rgba(255,255,255,0.03)",
+  border:    "rgba(255,255,255,0.06)",
+  border2:   "rgba(255,255,255,0.10)",
+  accent:    "#00d4aa",
+  accentDim: "#00d4aa18",
+  accentGlow:"0 0 24px rgba(0,212,170,0.18)",
+  gold:      "#f59e0b",
+  goldGlow:  "0 0 18px rgba(245,158,11,0.20)",
+  red:       "#f43f5e",
+  redGlow:   "0 0 18px rgba(244,63,94,0.22)",
+  green:     "#10b981",
+  greenGlow: "0 0 18px rgba(16,185,129,0.20)",
+  blue:      "#3b82f6",
+  purple:    "#a855f7",
+  text:      "#f1f5f9",
+  muted:     "#64748b",
+  muted2:    "#1e293b",
+  glass:     "rgba(255,255,255,0.04)",
+  glassBorder:"rgba(255,255,255,0.08)",
 };
 
 const marketPairs = [
@@ -666,14 +673,16 @@ function NavItem({ icon, label, active, onClick }) {
   return (
     <button onClick={onClick} style={{
       display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
-      borderRadius: 8, border: "none", cursor: "pointer", width: "100%", textAlign: "left",
-      background: active ? `${COLORS.accent}18` : "transparent",
+      borderRadius: 10, border: `1px solid ${active ? `${COLORS.accent}30` : "transparent"}`,
+      cursor: "pointer", width: "100%", textAlign: "left", marginBottom: 2,
+      background: active ? `${COLORS.accent}12` : "transparent",
       color: active ? COLORS.accent : COLORS.muted,
       transition: "all 0.15s",
+      boxShadow: active ? `0 0 16px ${COLORS.accent}15` : "none",
     }}>
-      <span style={{ fontSize: 16 }}>{icon}</span>
-      <span style={{ fontSize: 13, fontWeight: active ? 600 : 400, letterSpacing: 0.3 }}>{label}</span>
-      {active && <div style={{ marginLeft: "auto", width: 3, height: 16, background: COLORS.accent, borderRadius: 2 }} />}
+      <span style={{ fontSize: 15, opacity: active ? 1 : 0.7 }}>{icon}</span>
+      <span style={{ fontSize: 13, fontWeight: active ? 600 : 400, letterSpacing: 0.2 }}>{label}</span>
+      {active && <div style={{ marginLeft: "auto", width: 3, height: 18, borderRadius: 3, background: `linear-gradient(180deg, ${COLORS.accent}, ${COLORS.accent}66)` }} />}
     </button>
   );
 }
@@ -1129,29 +1138,31 @@ function NewsCard({ item, onClick }) {
   const [bulletHover, setBulletHover] = useState(false);
   return (
     <div onClick={onClick} style={{
-      display: "flex", gap: 12, padding: "12px 0",
-      borderBottom: `1px solid ${COLORS.border}`, cursor: "pointer",
+      display: "flex", gap: 12, padding: "11px 14px", margin: "0 0 6px",
+      borderRadius: 12, cursor: "pointer", transition: "background 0.15s",
+      background: COLORS.glass, border: `1px solid ${COLORS.glassBorder}`,
+      backdropFilter: "blur(8px)",
     }}>
-      <div style={{ width: 38, height: 38, borderRadius: 10, background: COLORS.border2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0, position: "relative" }}>
+      <div style={{ width: 38, height: 38, borderRadius: 10, background: "rgba(255,255,255,0.06)", border: `1px solid ${COLORS.glassBorder}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0, position: "relative" }}>
         {logo}
         {item.sentiment === "positive" && (
-          <div style={{ position: "absolute", bottom: -4, right: -4, width: 16, height: 16, borderRadius: "50%", background: COLORS.green, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#000" }}>▲</div>
+          <div style={{ position: "absolute", bottom: -4, right: -4, width: 16, height: 16, borderRadius: "50%", background: COLORS.green, boxShadow: COLORS.greenGlow, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: "#000" }}>▲</div>
         )}
         {item.sentiment === "negative" && (
-          <div style={{ position: "absolute", bottom: -4, right: -4, width: 16, height: 16, borderRadius: "50%", background: COLORS.red, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#fff" }}>▼</div>
+          <div style={{ position: "absolute", bottom: -4, right: -4, width: 16, height: 16, borderRadius: "50%", background: COLORS.red, boxShadow: COLORS.redGlow, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: "#fff" }}>▼</div>
         )}
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
           <span style={{ fontSize: 10, color: COLORS.muted, fontFamily: "monospace" }}>{age}</span>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             {hasSimilar && <span style={{ fontSize: 9, color: COLORS.gold, fontFamily: "monospace" }}>📚 {item.similar.length}</span>}
-            <span style={{ fontSize: 9, padding: "2px 7px", borderRadius: 4, fontFamily: "monospace", background: `${color}18`, color, letterSpacing: 1, fontWeight: 600 }}>
+            <span style={{ fontSize: 9, padding: "2px 8px", borderRadius: 5, fontFamily: "monospace", background: `${color}18`, color, border: `1px solid ${color}30`, letterSpacing: 0.8, fontWeight: 700 }}>
               {label.toUpperCase()}
             </span>
           </div>
         </div>
-        <div style={{ fontSize: 12, color: COLORS.text, lineHeight: 1.4, marginBottom: 4, fontWeight: 500 }}>{cleanTitle(item.title)}</div>
+        <div style={{ fontSize: 12, color: COLORS.text, lineHeight: 1.45, marginBottom: 5, fontWeight: 500 }}>{cleanTitle(item.title)}</div>
         <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
           {(() => {
             const s   = Math.abs(item.model_score || 0);
@@ -1160,16 +1171,15 @@ function NewsCard({ item, onClick }) {
             const clr  = tier === "Hot" ? COLORS.red : tier === "Medium" ? "#f97316" : COLORS.muted;
             const dots = tier === "Hot" ? "●●●" : tier === "Medium" ? "●●" : "●";
             return (
-              <span style={{ fontSize: 10, color: COLORS.muted, display: "flex", alignItems: "center", gap: 3, position: "relative" }}>
-                Impact:&nbsp;
+              <span style={{ fontSize: 10, color: COLORS.muted, display: "flex", alignItems: "center", gap: 4, position: "relative" }}>
                 <span
                   onMouseEnter={e => { e.stopPropagation(); setBulletHover(true); }}
                   onMouseLeave={() => setBulletHover(false)}
-                  style={{ color: clr, fontSize: 11, letterSpacing: 1, cursor: "help" }}
+                  style={{ color: clr, fontSize: 10, letterSpacing: 2, cursor: "help", textShadow: tier === "Hot" ? `0 0 8px ${clr}` : "none" }}
                 >
                   {dots}
                 </span>
-                <span style={{ color: clr }}>{tier}</span>
+                <span style={{ color: clr, fontWeight: 600 }}>{tier}</span>
                 {bulletHover && (
                   <div style={{
                     position: "absolute", bottom: "calc(100% + 6px)", left: 0,
@@ -2337,31 +2347,35 @@ export default function CryptoDashboard() {
     <div style={{ display: "flex", height: "100vh", width: "100vw", background: COLORS.bg, color: COLORS.text, fontFamily: "'DM Sans', system-ui, sans-serif", overflow: "hidden" }}>
 
       {/* ── Sidebar ── */}
-      <div style={{ width: 220, flexShrink: 0, background: COLORS.panel, borderRight: `1px solid ${COLORS.border}`, display: "flex", flexDirection: "column", height: "100%" }}>
-        <div style={{ padding: "20px 16px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
-          <img src="/logo_center.avif" alt="logo" style={{ width: 50, height: 50, borderRadius: 10, objectFit: "cover" }} />
-          <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.text, letterSpacing: 0.5, textAlign: "center" }}>Crypto Sentiment Analyze</div>
+      <div style={{ width: 230, flexShrink: 0, background: "linear-gradient(180deg, #0a0e1a 0%, #070a12 100%)", borderRight: `1px solid ${COLORS.border}`, display: "flex", flexDirection: "column", height: "100%" }}>
+        <div style={{ padding: "24px 16px 20px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+          <div style={{ position: "relative" }}>
+            <img src="/logo_center.avif" alt="logo" style={{ width: 52, height: 52, borderRadius: 14, objectFit: "cover", display: "block" }} />
+            <div style={{ position: "absolute", inset: -1, borderRadius: 15, background: "transparent", boxShadow: COLORS.accentGlow, pointerEvents: "none" }} />
+          </div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.text, letterSpacing: 0.5, textAlign: "center", lineHeight: 1.4 }}>Crypto Sentiment<br/><span style={{ color: COLORS.accent, fontWeight: 500, fontSize: 11 }}>Analyze</span></div>
         </div>
-        <div style={{ flex: 1, padding: "12px 8px", overflowY: "auto" }}>
+        <div style={{ flex: 1, padding: "14px 10px", overflowY: "auto" }}>
           {navItems.map(item => (
             <NavItem key={item.label} icon={item.icon} label={item.label}
               active={activeNav === item.label} onClick={() => setActiveNav(item.label)} />
           ))}
           {/* Coin filter in sidebar */}
-          <div style={{ marginTop: 12, padding: "8px 4px", borderTop: `1px solid ${COLORS.border}` }}>
-            <div style={{ fontSize: 10, fontWeight: 600, color: COLORS.muted, letterSpacing: 1, marginBottom: 8, paddingLeft: 4 }}>COIN FILTER</div>
+          <div style={{ marginTop: 14, padding: "12px 4px 4px", borderTop: `1px solid ${COLORS.border}` }}>
+            <div style={{ fontSize: 9, fontWeight: 700, color: COLORS.muted, letterSpacing: 1.5, marginBottom: 8, paddingLeft: 6 }}>COIN FILTER</div>
             {[
-              { id: "all", label: "All Coins",  icon: "◎", color: COLORS.accent },
-              { id: "btc", label: "₿ Bitcoin",  icon: "₿", color: "#F7931A" },
-              { id: "eth", label: "Ξ Ethereum", icon: "Ξ", color: "#627EEA" },
+              { id: "all", label: "All Coins", icon: "◎", color: COLORS.accent },
+              { id: "btc", label: "Bitcoin",   icon: "₿",  color: "#F7931A" },
+              { id: "eth", label: "Ethereum",  icon: "Ξ",  color: "#627EEA" },
             ].map(c => (
               <div key={c.id} onClick={() => { setCoinFilter(c.id); if (c.id !== "all") { setSelectedSymbol(c.id === "btc" ? "BTCUSDT" : "ETHUSDT"); setSelectedPair(`BINANCE:${c.id === "btc" ? "BTCUSDT" : "ETHUSDT"}`); } }} style={{
-                display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderRadius: 8,
-                cursor: "pointer", marginBottom: 2,
-                background: coinFilter === c.id ? `${c.color}20` : "transparent",
-                border: `1px solid ${coinFilter === c.id ? c.color : "transparent"}`,
+                display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 10,
+                cursor: "pointer", marginBottom: 3, transition: "all 0.15s",
+                background: coinFilter === c.id ? `${c.color}15` : "transparent",
+                border: `1px solid ${coinFilter === c.id ? `${c.color}60` : "transparent"}`,
+                boxShadow: coinFilter === c.id ? `0 0 12px ${c.color}18` : "none",
               }}>
-                <span style={{ fontSize: 13, color: c.color }}>{c.icon}</span>
+                <span style={{ fontSize: 14, width: 20, textAlign: "center", color: c.color }}>{c.icon}</span>
                 <span style={{ fontSize: 12, fontWeight: coinFilter === c.id ? 700 : 400, color: coinFilter === c.id ? c.color : COLORS.muted }}>{c.label}</span>
               </div>
             ))}
@@ -2483,33 +2497,38 @@ export default function CryptoDashboard() {
           {activeNav === "Dashboard" && (
             <div style={{ flex: 1, display: "flex", flexDirection: "column", overflowY: "auto" }}>
               {/* Chart header — BTC / ETH switcher + interval + clock */}
-              <div style={{ padding: "10px 16px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", alignItems: "center", gap: 12, background: COLORS.panel, flexShrink: 0, position: "sticky", top: 0, zIndex: 10 }}>
+              <div style={{ padding: "10px 20px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", alignItems: "center", gap: 12, background: "rgba(8,12,20,0.95)", backdropFilter: "blur(12px)", flexShrink: 0, position: "sticky", top: 0, zIndex: 10 }}>
                 <div style={{ display: "flex", gap: 6 }}>
                   {[
                     { sym: "BTCUSDT", label: "₿ BTC", color: "#F7931A" },
                     { sym: "ETHUSDT", label: "Ξ ETH", color: "#627EEA" },
                   ].map(({ sym, label, color }) => (
                     <button key={sym} onClick={() => { setSelectedSymbol(sym); setSelectedPair(`BINANCE:${sym}`); }} style={{
-                      padding: "4px 14px", borderRadius: 8, fontSize: 12, cursor: "pointer", fontWeight: 700,
-                      border: `2px solid ${selectedSymbol === sym ? color : COLORS.border2}`,
-                      background: selectedSymbol === sym ? `${color}20` : "transparent",
+                      padding: "5px 16px", borderRadius: 9, fontSize: 12, cursor: "pointer", fontWeight: 700,
+                      border: `1px solid ${selectedSymbol === sym ? `${color}60` : COLORS.border}`,
+                      background: selectedSymbol === sym ? `${color}18` : "transparent",
                       color: selectedSymbol === sym ? color : COLORS.muted,
+                      boxShadow: selectedSymbol === sym ? `0 0 14px ${color}20` : "none",
+                      transition: "all 0.15s",
                     }}>{label}</button>
                   ))}
                 </div>
-                <div style={{ width: 1, height: 16, background: COLORS.border2 }} />
-                <div style={{ display: "flex", gap: 4 }}>
+                <div style={{ width: 1, height: 18, background: COLORS.border }} />
+                <div style={{ display: "flex", gap: 3, background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: "3px 4px", border: `1px solid ${COLORS.border}` }}>
                   {["1m","5m","15m","1h","4h","1d"].map(iv => (
                     <button key={iv} onClick={() => setChartInterval(iv)} style={{
-                      padding: "3px 8px", borderRadius: 5, fontSize: 10, cursor: "pointer", fontFamily: "monospace",
+                      padding: "3px 9px", borderRadius: 6, fontSize: 10, cursor: "pointer", fontFamily: "monospace",
                       border: "none",
                       background: chartInterval === iv ? COLORS.accent : "transparent",
                       color: chartInterval === iv ? "#000" : COLORS.muted,
                       fontWeight: chartInterval === iv ? 700 : 400,
+                      boxShadow: chartInterval === iv ? COLORS.accentGlow : "none",
+                      transition: "all 0.12s",
                     }}>{iv}</button>
                   ))}
                 </div>
-                <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ width: 6, height: 6, borderRadius: "50%", background: COLORS.green, boxShadow: COLORS.greenGlow, animation: "pulse 2s infinite" }} />
                   <span style={{ fontSize: 11, fontFamily: "monospace", color: COLORS.muted }}>
                     {time.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false })}
                   </span>
