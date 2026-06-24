@@ -561,7 +561,6 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
               <div style={{ width: 8, height: 8, borderRadius: "50%", background: COLORS.accent, boxShadow: COLORS.accentGlow, animation: "pulse 1.2s ease-in-out infinite" }} />
               <span style={{ fontSize: 13, color: COLORS.text, fontWeight: 500, letterSpacing: 0.3 }}>Loading chart</span>
             </div>
-            <span style={{ fontSize: 11, color: COLORS.muted, fontFamily: "monospace" }}>Fetching price data from Binance…</span>
           </div>
         </div>
       )}
