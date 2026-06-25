@@ -77,6 +77,13 @@ def ratio_decision(pos: float, neg: float, threshold: float = 1.5) -> str:
     return "neutral"
 
 
+def _strip_thinking(text: str) -> str:
+    """Strip <think>...</think> blocks used by DeepSeek-R1, Qwen3, etc."""
+    if "</think>" in text:
+        text = text.split("</think>")[-1]
+    return text.strip()
+
+
 def _llm_openai_compat(headlines, base_url, api_key, model, name):
     """Generic runner for any OpenAI-compatible API (DeepSeek, Groq, etc.)."""
     try:
@@ -90,11 +97,11 @@ def _llm_openai_compat(headlines, base_url, api_key, model, name):
         try:
             r = client.chat.completions.create(
                 model=model,
-                max_tokens=5,
+                max_tokens=200,
                 temperature=0,
                 messages=[{"role": "user", "content": PROMPT_TEMPLATE.format(title=h["title"])}],
             )
-            raw = r.choices[0].message.content.strip()
+            raw = _strip_thinking(r.choices[0].message.content.strip())
             preds.append(normalize(raw))
         except Exception as e:
             print(f"       ⚠ {name} error on id={h['id']}: {e}")
@@ -208,26 +215,26 @@ def run_groq_llama(headlines):
         api_key=key, model="llama-3.3-70b-versatile", name="Groq/Llama3.3")
 
 
-def run_groq_mixtral(headlines):
-    print("  [9] Groq / Mixtral-8x7B (free API) …", flush=True)
+def run_groq_qwen(headlines):
+    print("  [9] Groq / Qwen3-32B (free API) …", flush=True)
     key = os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY_2")
     if not key:
         print("       ⚠ GROQ_API_KEY not set — get free key at console.groq.com")
         return None
     return _llm_openai_compat(headlines,
         base_url="https://api.groq.com/openai/v1",
-        api_key=key, model="mixtral-8x7b-32768", name="Groq/Mixtral")
+        api_key=key, model="qwen/qwen3-32b", name="Groq/Qwen3-32B")
 
 
-def run_groq_gemma(headlines):
-    print("  [10] Groq / Gemma2-9B (free API) …", flush=True)
+def run_groq_llama_small(headlines):
+    print("  [10] Groq / Llama-3.1-8B (free API, fast) …", flush=True)
     key = os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY_2")
     if not key:
         print("       ⚠ GROQ_API_KEY not set — get free key at console.groq.com")
         return None
     return _llm_openai_compat(headlines,
         base_url="https://api.groq.com/openai/v1",
-        api_key=key, model="gemma2-9b-it", name="Groq/Gemma2")
+        api_key=key, model="llama-3.1-8b-instant", name="Groq/Llama3.1-8B")
 
 
 def run_gemini(headlines):
@@ -239,11 +246,22 @@ def run_gemini(headlines):
     try:
         from google import genai
         client = genai.Client(api_key=key)
+        # Try models in order: newest first, fallback to older
+        for model_name in ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-latest"]:
+            try:
+                test = client.models.generate_content(model=model_name,
+                    contents="Reply with one word: positive")
+                break
+            except Exception:
+                continue
+        else:
+            print("       ⚠ Gemini: no working model found — check API key at aistudio.google.com")
+            return None
         preds = []
         for h in headlines:
             try:
                 r = client.models.generate_content(
-                    model="gemini-2.0-flash",
+                    model=model_name,
                     contents=PROMPT_TEMPLATE.format(title=h["title"]),
                 )
                 preds.append(normalize(r.text.strip()))
@@ -304,9 +322,7 @@ def run_ollama(headlines, model="deepseek-r1:7b"):
                 r = client.chat(model=model, messages=[
                     {"role": "user", "content": PROMPT_TEMPLATE.format(title=h["title"])}
                 ])
-                raw = r["message"]["content"].strip()
-                if "</think>" in raw:
-                    raw = raw.split("</think>")[-1].strip()
+                raw = _strip_thinking(r["message"]["content"].strip())
                 preds.append(normalize(raw))
             except Exception as e:
                 print(f"       ⚠ Ollama error on id={h['id']}: {e}")
@@ -411,13 +427,13 @@ def print_table(results: dict, headlines: list, verbose: bool):
 # ── main ───────────────────────────────────────────────────────────
 
 LLM_RUNNERS = {
-    "deepseek":    ("DeepSeek-V3",          run_deepseek),
-    "groq_llama":  ("Groq/Llama-3.3-70B",   run_groq_llama),
-    "groq_mixtral":("Groq/Mixtral-8x7B",    run_groq_mixtral),
-    "groq_gemma":  ("Groq/Gemma2-9B",       run_groq_gemma),
-    "gemini":      ("Gemini-2.0-Flash",      run_gemini),
-    "ollama":      ("Ollama/DeepSeek-R1:7B", lambda h: run_ollama(h, "deepseek-r1:7b")),
-    "claude":      ("Claude Haiku",          run_claude),
+    "deepseek":        ("DeepSeek-V3",          run_deepseek),
+    "groq_llama":      ("Groq/Llama-3.3-70B",   run_groq_llama),
+    "groq_qwen":       ("Groq/Qwen3-32B",        run_groq_qwen),
+    "groq_llama_small":("Groq/Llama3.1-8B",      run_groq_llama_small),
+    "gemini":          ("Gemini-2.0-Flash",       run_gemini),
+    "ollama":          ("Ollama/DeepSeek-R1:7B",  lambda h: run_ollama(h, "deepseek-r1:7b")),
+    "claude":          ("Claude Haiku",           run_claude),
 }
 
 BERT_RUNNERS = [
