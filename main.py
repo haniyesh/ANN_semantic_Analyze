@@ -608,7 +608,7 @@ async def process_news_item(news: dict):
         "similarity":       float(rag_features[8]) if len(rag_features) > 8 else 0.0,
         "news_type":        news_type,
         "sentiment_reliable": sent.get("sentiment_reliable", True),
-        "source":           "live_xgb_v9",
+        "source":           "live_xgb_v10",
         "similar": [
             {
                 "title":  s.get("title", ""),

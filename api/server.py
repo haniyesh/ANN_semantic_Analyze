@@ -556,6 +556,7 @@ def get_training_stats():
         "v7":           ROOT / "production_results_v7.json",
         "v8":           ROOT / "production_results_v8.json",
         "v9":           ROOT / "production_results_v9.json",
+        "xgboost_v10":  ROOT / "xgboost_v10_groq_results.json",
         "xgboost_v9":   ROOT / "xgboost_v9_results.json",
         "xgboost":      ROOT / "xgboost_results.json",
     }
@@ -565,8 +566,8 @@ def get_training_stats():
             with open(path, encoding="utf-8") as f:
                 all_models[name] = json.load(f)
 
-    # Current best model = xgboost_v9 → v9 → v8 → ...
-    best = next((k for k in ["xgboost_v9","v9","v8","v7","v6","v5"] if k in all_models), None)
+    # Current best model = xgboost_v10 → xgboost_v9 → v9 → v8 → ...
+    best = next((k for k in ["xgboost_v10","xgboost_v9","v9","v8","v7","v6","v5"] if k in all_models), None)
     if best:
         stats["model_performance"] = all_models[best]
     stats["all_models"] = all_models
@@ -693,9 +694,10 @@ def get_report_summary():
     import datetime
 
     csv_path     = ROOT / "news_cleaned_filtered.csv"
-    # Prefer xgboost_v9 → v9 ANN → v8 ANN
+    # Prefer xgboost_v10 → xgboost_v9 → v9 ANN → v8 ANN
     results_path = next(
         (p for p in [
+            ROOT / "xgboost_v10_groq_results.json",
             ROOT / "xgboost_v9_results.json",
             ROOT / "production_results_v9.json",
             ROOT / "production_results_v8.json",
@@ -819,14 +821,14 @@ def get_report_summary():
             model_results = json.load(f)
 
     architecture = {
-        "name":       "XGBoost v9 (DualBERT + PriceContext)",
+        "name":       "XGBoost v10 (DualBERT + Groq/Llama-3.3-70B Sentiment)",
         "type":       "Gradient Boosted Trees — GPU (device=cuda, tree_method=hist)",
-        "file":       "xgboost_v9.py",
-        "feature_dim": 1578,
+        "file":       "xgboost_v10_groq.py",
+        "feature_dim": 1562,
         "feature_layout": [
             {"name": "CryptoBERT embedding",    "dims": 768},
             {"name": "FinBERT embedding",        "dims": 768},
-            {"name": "Ensemble sentiment (3-BERT + derived)", "dims": 13},
+            {"name": "Groq/Llama-3.3-70B sentiment (3 one-hot + 3 scalar)", "dims": 6},
             {"name": "News-type probs",          "dims": 11},
             {"name": "Macro timing (5) + price context (3)", "dims": 8},
             {"name": "RAG features",             "dims": 10},
@@ -1200,7 +1202,7 @@ async def analyze_custom(body: dict):
                   "Medium" if p15 >= SCORE_MED  else "Show")
         signal = "BUY" if sent["sentiment"] == "positive" else ("SELL" if sent["sentiment"] == "negative" else "NEUTRAL")
 
-        from training.xgboost_v9 import crypto_news_type_classify
+        from training.xgboost_v10_groq import crypto_news_type_classify
         type_probs = crypto_news_type_classify(cb_emb.reshape(1, -1))[0]
         TYPE_LABELS = ["regulatory","partnership","product","hack_security","market_move",
                        "macro","adoption","exchange","defi","nft","other"]
