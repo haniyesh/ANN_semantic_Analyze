@@ -188,7 +188,7 @@ def run_ensemble(headlines):
 
 def run_deepseek(headlines):
     print("  [7] DeepSeek-V3 (free API) …", flush=True)
-    key = os.environ.get("DEEPSEEK_API_KEY")
+    key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API")
     if not key:
         print("       ⚠ DEEPSEEK_API_KEY not set — get free key at platform.deepseek.com")
         return None
@@ -199,7 +199,7 @@ def run_deepseek(headlines):
 
 def run_groq_llama(headlines):
     print("  [8] Groq / Llama-3.3-70B (free API) …", flush=True)
-    key = os.environ.get("GROQ_API_KEY")
+    key = os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY_2")
     if not key:
         print("       ⚠ GROQ_API_KEY not set — get free key at console.groq.com")
         return None
@@ -210,7 +210,7 @@ def run_groq_llama(headlines):
 
 def run_groq_mixtral(headlines):
     print("  [9] Groq / Mixtral-8x7B (free API) …", flush=True)
-    key = os.environ.get("GROQ_API_KEY")
+    key = os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY_2")
     if not key:
         print("       ⚠ GROQ_API_KEY not set — get free key at console.groq.com")
         return None
@@ -221,7 +221,7 @@ def run_groq_mixtral(headlines):
 
 def run_groq_gemma(headlines):
     print("  [10] Groq / Gemma2-9B (free API) …", flush=True)
-    key = os.environ.get("GROQ_API_KEY")
+    key = os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY_2")
     if not key:
         print("       ⚠ GROQ_API_KEY not set — get free key at console.groq.com")
         return None
@@ -232,7 +232,7 @@ def run_groq_gemma(headlines):
 
 def run_gemini(headlines):
     print("  [11] Google Gemini Flash (free API) …", flush=True)
-    key = os.environ.get("GEMINI_API_KEY")
+    key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API")
     if not key:
         print("       ⚠ GEMINI_API_KEY not set — get free key at aistudio.google.com")
         return None
@@ -256,18 +256,55 @@ def run_gemini(headlines):
         return None
 
 
+def _get_ollama_host() -> str:
+    """Find the Ollama server — tries localhost, then Windows host IP (for WSL)."""
+    import urllib.request
+    for host in ["http://localhost:11434", "http://host.docker.internal:11434"]:
+        try:
+            urllib.request.urlopen(f"{host}/api/tags", timeout=2)
+            return host
+        except Exception:
+            pass
+    # WSL2: Windows host IP from /etc/resolv.conf
+    try:
+        with open("/etc/resolv.conf") as f:
+            for line in f:
+                if line.startswith("nameserver"):
+                    ip = line.split()[1].strip()
+                    host = f"http://{ip}:11434"
+                    urllib.request.urlopen(f"{host}/api/tags", timeout=2)
+                    return host
+    except Exception:
+        pass
+    return "http://localhost:11434"  # fallback
+
+
 def run_ollama(headlines, model="deepseek-r1:7b"):
     print(f"  [12] Ollama / {model} (local, free) …", flush=True)
     try:
         import ollama
+        host = _get_ollama_host()
+        client = ollama.Client(host=host)
+        # Check model is available
+        try:
+            available = [m["name"] for m in client.list()["models"]]
+            if not any(model.split(":")[0] in m for m in available):
+                print(f"       ⚠ Model '{model}' not found. Available: {available}")
+                print(f"         Pull it first: ollama pull {model}")
+                if available:
+                    model = available[0]
+                    print(f"         Using '{model}' instead.")
+                else:
+                    return None
+        except Exception:
+            pass
         preds = []
         for h in headlines:
             try:
-                r = ollama.chat(model=model, messages=[
+                r = client.chat(model=model, messages=[
                     {"role": "user", "content": PROMPT_TEMPLATE.format(title=h["title"])}
                 ])
                 raw = r["message"]["content"].strip()
-                # DeepSeek-R1 wraps answer in <think>...</think>
                 if "</think>" in raw:
                     raw = raw.split("</think>")[-1].strip()
                 preds.append(normalize(raw))
@@ -276,7 +313,7 @@ def run_ollama(headlines, model="deepseek-r1:7b"):
                 preds.append("neutral")
         return preds
     except ImportError:
-        print("       ⚠ ollama not installed — pip install ollama (and install Ollama app)")
+        print("       ⚠ ollama not installed — pip install ollama")
         return None
 
 
