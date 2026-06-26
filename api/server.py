@@ -618,9 +618,9 @@ def get_training_stats():
                 ch = row.get("channel", "unknown")
                 channels[ch] = channels.get(ch, 0) + 1
                 try: weights.append(float(row["weight"]))
-                except: pass
+                except (ValueError, KeyError, TypeError): pass
                 try: confidences.append(float(row["confidence"]))
-                except: pass
+                except (ValueError, KeyError, TypeError): pass
                 try:
                     bp   = float(row["btc_price_at_news"])
                     b15  = float(row["btc_price_15m"])
@@ -631,7 +631,7 @@ def get_training_stats():
                     btc_1h.append(round(c1h, 4))
                     if abs(c15) >= 0.3: impact_15m += 1
                     if abs(c1h) >= 0.5: impact_1h  += 1
-                except: pass
+                except (ValueError, KeyError, TypeError, ZeroDivisionError): pass
 
         def avg(lst): return round(sum(lst) / len(lst), 4) if lst else 0
         def pct(n):   return round(n / total * 100, 1)     if total else 0
@@ -690,7 +690,7 @@ def get_category_stats():
                 elif "FP" in r: s["fp"] += 1
                 elif "FN" in r: s["fn"] += 1
                 try:   s["scores"].append(float(row["model_score"]))
-                except: pass
+                except (ValueError, KeyError, TypeError): pass
 
     result = []
     for nt in set(list(train_counts.keys()) + list(test_stats.keys())):
@@ -771,7 +771,7 @@ def get_report_summary():
                     c1h = (float(row["btc_price_1h"])  - float(row["btc_price_at_news"])) / float(row["btc_price_at_news"]) * 100
                     if abs(c15) >= 0.3: train["impactful_15m_count"] += 1
                     if abs(c1h) >= 0.5: train["impactful_1h_count"]  += 1
-                except: pass
+                except (ValueError, KeyError, TypeError, ZeroDivisionError): pass
         n = train["total_filtered"] or 1
         train["impactful_15m_pct"] = round(train["impactful_15m_count"] / n * 100, 1)
         train["impactful_1h_pct"]  = round(train["impactful_1h_count"]  / n * 100, 1)
@@ -1126,7 +1126,7 @@ async def proxy_stream(ws: WebSocket, symbol: str, interval: str):
         pass
     finally:
         try: await ws.close()
-        except: pass
+        except Exception: pass
 
 
 # ── Custom news analyzer ──────────────────────────────────────────

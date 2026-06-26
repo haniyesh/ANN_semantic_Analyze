@@ -122,6 +122,16 @@ def load_data() -> pd.DataFrame:
     df = df.dropna(subset=["btc_price_at_news", "btc_price_15m", "btc_price_1h"])
     df = df.drop_duplicates(subset=["title", "published", "channel"])
 
+    # Quarantine rows whose timestamp is a date-level placeholder (noon UTC),
+    # because their 15m/1h labels are derived from a fabricated instant and are
+    # not meaningful intraday outcomes. Controlled by KEEP_UNRELIABLE_TS=1.
+    if "timestamp_reliable" in df.columns and os.getenv("KEEP_UNRELIABLE_TS", "0") != "1":
+        rel = df["timestamp_reliable"].astype(str).str.lower().isin(["true", "1", "1.0"])
+        dropped = int((~rel).sum())
+        if dropped:
+            print(f"  Dropping {dropped:,} rows with unreliable (date-level) timestamps")
+        df = df[rel].copy()
+
     df["btc_change_15m"]   = (df["btc_price_15m"] - df["btc_price_at_news"]) / df["btc_price_at_news"] * 100
     df["abs_change_15m"]   = df["btc_change_15m"].abs()
     df["is_impactful_15m"] = (df["abs_change_15m"] > THRESHOLD_15M).astype(int)

@@ -149,8 +149,28 @@ are not in the repo and cannot be regenerated from it alone:
 - A Qdrant Cloud instance (`QDRANT_URL`, `QDRANT_API_KEY`) is required for RAG
   features. Without it, train with `--skip-rag` (RAG features are zeroed).
 
-Until the dataset build is scripted end-to-end, treat the project as a
-**research prototype**, not a turnkey system.
+### Rebuilding the dataset
+
+`scripts/build_dataset.py` runs the full chain end-to-end and fails fast with a
+clear message if a raw input or required key is missing:
+
+```bash
+python scripts/build_dataset.py --check       # verify inputs/env only
+python scripts/build_dataset.py               # merge → score → train
+python scripts/build_dataset.py --skip-rag    # train without Qdrant/RAG
+```
+
+Raw Kaggle inputs (`bitcoin_sentiments_21_24.csv`, `BTC.csv`, `ETH.csv`) must
+be placed in the repo root first; they are not committed.
+
+**Timestamp quality:** headlines from the daily `BTC.csv`/`ETH.csv` sources only
+carry a calendar date, so they are stamped at noon UTC and flagged
+`timestamp_reliable=false`. Their 15m/1h labels are not meaningful intraday
+outcomes, so training drops them by default. Set `KEEP_UNRELIABLE_TS=1` to keep
+them (not recommended).
+
+Treat the project as a **research prototype**, not a turnkey system, until you
+have rebuilt the dataset and re-measured metrics on the leak-free pipeline.
 
 ---
 
