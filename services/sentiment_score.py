@@ -159,12 +159,45 @@ def _score_to_cols(prob_pos: float, prob_neg: float, prob_neu: float) -> dict:
     }
 
 
-def score_batch(titles: list[str], m: dict) -> list[dict]:
+def _ensemble_columns(cb, fb, rb) -> dict:
+    """Compute the 3-model ensemble feature columns the XGBoost model expects.
+
+    This MUST match main.py Step 1b exactly so that training data and live
+    inference share the same sentiment feature semantics (train/serve parity).
+    `cb`, `fb`, `rb` are each (pos, neg, neu) tuples.
+    """
+    cb_pos, cb_neg, cb_neu = cb
+    fb_pos, fb_neg, fb_neu = fb
+    rb_pos, rb_neg, rb_neu = rb
+
+    avg_pos = (cb_pos + fb_pos + rb_pos) / 3
+    avg_neg = (cb_neg + fb_neg + rb_neg) / 3
+    avg_neu = (cb_neu + fb_neu + rb_neu) / 3
+
+    nets = [cb_pos - cb_neg, fb_pos - fb_neg, rb_pos - rb_neg]
+    mean_net = sum(nets) / 3
+    signs = [1 if n > 0 else (-1 if n < 0 else 0) for n in nets]
+    agreement = 1.0 if len(set(signs)) == 1 else 0.5
+
+    return {
+        "cb_prob_pos": round(cb_pos, 4), "cb_prob_neg": round(cb_neg, 4), "cb_prob_neu": round(cb_neu, 4),
+        "fb_prob_pos": round(fb_pos, 4), "fb_prob_neg": round(fb_neg, 4), "fb_prob_neu": round(fb_neu, 4),
+        "rb_prob_pos": round(rb_pos, 4), "rb_prob_neg": round(rb_neg, 4), "rb_prob_neu": round(rb_neu, 4),
+        "net_agreement": round(mean_net * agreement, 4),
+        "_avg": (avg_pos, avg_neg, avg_neu),
+    }
+
+
+def score_batch(titles: list[str], m: dict, ensemble: bool = True) -> list[dict]:
     """
     Score a batch. For each title:
       1. CryptoBERT embed + classify type
-      2. Route to FinBERT / RoBERTa / CryptoBERT sentiment
-    CryptoBERT sentiment is free (same forward pass as embedding).
+      2. Run all three sentiment models and emit per-model probability columns
+         (cb_/fb_/rb_prob_* + net_agreement) so training matches live inference.
+         The final sentiment is derived from the 3-model average — identical to
+         main.py Step 1b.
+
+    Set ``ensemble=False`` for the legacy single-routed-model behaviour.
     """
     titles = [str(t).strip() or "crypto news" for t in titles]
 
@@ -182,37 +215,42 @@ def score_batch(titles: list[str], m: dict) -> list[dict]:
     for i, (title, ntype) in enumerate(zip(titles, news_types)):
         cb_neg, cb_neu, cb_pos = float(cb_probs[i][0]), float(cb_probs[i][1]), float(cb_probs[i][2])
 
-        if ntype in FINBERT_TYPES:
-            # ── FinBERT path ─────────────────────────────────────
-            try:
-                fb = {s["label"].lower(): s["score"]
-                      for s in m["fb"](f"Bitcoin crypto market: {title}",
-                                       truncation=True)[0]}
-                pp = fb.get("positive", cb_pos)
-                pn = fb.get("negative", cb_neg)
-                pu = fb.get("neutral",  cb_neu)
-            except Exception:
-                pp, pn, pu = cb_pos, cb_neg, cb_neu
+        # Always run FinBERT + RoBERTa so we can emit the ensemble columns.
+        try:
+            fb = {s["label"].lower(): s["score"]
+                  for s in m["fb"](f"Bitcoin crypto market: {title}", truncation=True)[0]}
+            fb_pos, fb_neg, fb_neu = fb.get("positive", cb_pos), fb.get("negative", cb_neg), fb.get("neutral", cb_neu)
+        except Exception:
+            fb_pos, fb_neg, fb_neu = cb_pos, cb_neg, cb_neu
+        try:
+            rb = {s["label"].lower(): s["score"]
+                  for s in m["rb"](f"BREAKING: {title} #Bitcoin #Crypto", truncation=True)[0]}
+            rb_pos, rb_neg, rb_neu = rb.get("positive", cb_pos), rb.get("negative", cb_neg), rb.get("neutral", cb_neu)
+        except Exception:
+            rb_pos, rb_neg, rb_neu = cb_pos, cb_neg, cb_neu
 
-        elif ntype in ROBERTA_TYPES:
-            # ── RoBERTa path ─────────────────────────────────────
-            try:
-                rb = {s["label"].lower(): s["score"]
-                      for s in m["rb"](f"BREAKING: {title} #Bitcoin #Crypto",
-                                       truncation=True)[0]}
-                # RoBERTa labels: positive/negative/neutral
-                pp = rb.get("positive", cb_pos)
-                pn = rb.get("negative", cb_neg)
-                pu = rb.get("neutral",  cb_neu)
-            except Exception:
-                pp, pn, pu = cb_pos, cb_neg, cb_neu
+        ens = _ensemble_columns(
+            (cb_pos, cb_neg, cb_neu),
+            (fb_pos, fb_neg, fb_neu),
+            (rb_pos, rb_neg, rb_neu),
+        )
 
+        if ensemble:
+            # Derive sentiment from the 3-model average (matches main.py).
+            pp, pn, pu = ens.pop("_avg")
         else:
-            # ── CryptoBERT path (already computed) ───────────────
-            pp, pn, pu = cb_pos, cb_neg, cb_neu
+            ens.pop("_avg", None)
+            # Legacy routed selection
+            if ntype in FINBERT_TYPES:
+                pp, pn, pu = fb_pos, fb_neg, fb_neu
+            elif ntype in ROBERTA_TYPES:
+                pp, pn, pu = rb_pos, rb_neg, rb_neu
+            else:
+                pp, pn, pu = cb_pos, cb_neg, cb_neu
 
         row = _score_to_cols(pp, pn, pu)
-        row["news_type"] = ntype   # update news_type from classification
+        row.update(ens)               # add cb_/fb_/rb_prob_* + net_agreement
+        row["news_type"] = ntype
         results.append(row)
 
     return results
@@ -220,7 +258,11 @@ def score_batch(titles: list[str], m: dict) -> list[dict]:
 
 def score_dataframe(df: pd.DataFrame, model: dict, ckpt_path: Path) -> pd.DataFrame:
     sent_cols = ["sentiment", "sentiment_score", "weight",
-                 "confidence", "prob_positive", "prob_negative", "prob_neutral"]
+                 "confidence", "prob_positive", "prob_negative", "prob_neutral",
+                 "cb_prob_pos", "cb_prob_neg", "cb_prob_neu",
+                 "fb_prob_pos", "fb_prob_neg", "fb_prob_neu",
+                 "rb_prob_pos", "rb_prob_neg", "rb_prob_neu",
+                 "net_agreement", "news_type"]
     for col in sent_cols:
         if col not in df.columns:
             df[col] = None

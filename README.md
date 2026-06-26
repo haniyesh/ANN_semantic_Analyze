@@ -44,16 +44,25 @@ A React-based dashboard that connects to the backend in real time.
 ```bash
 python -m venv .venv311
 source .venv311/bin/activate      # Windows: .venv311\Scripts\activate
-pip install -r requirements.txt
+# torch CPU wheels need the PyTorch index:
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
-Copy `.env.example` to `.env` and fill in your credentials:
+Copy `.env.example` to `.env` and fill in your credentials. Key variables:
 ```
 TELEGRAM_API_ID=...
 TELEGRAM_API_HASH=...
 TELEGRAM_CHANNELS=channel1,channel2
 BOT_TOKEN=...
+QDRANT_URL=... / QDRANT_API_KEY=...   # required for RAG (or train with --skip-rag)
+ALLOWED_ORIGINS=http://localhost:5173 # CORS allowlist (never use *)
+INGEST_API_KEY=...                    # required to POST /news (live pipeline → API)
+DB_SSL_CA=/path/ca.pem                # verify DB TLS in prod (do not disable verification)
 ```
+
+> The live pipeline authenticates to the API with `INGEST_API_KEY`; set the
+> same value for `main.py` and the server. Without it, `POST /news` is disabled
+> (fails closed).
 
 ### 1. Start the API server
 
