@@ -5,9 +5,10 @@ Mirrors v9.py (ANN pipeline) exactly:
   - Same dual CryptoBERT+FinBERT embeddings (DUAL_EMB_DIM=1536)
   - Same ensemble sentiment features (3-BERT: cb/fb/rb probs + net_agreement)
   - Same price-context macro features (btc_vol, btc_mom, fear_greed)
-  - Same RAG features (Qdrant macro-conditioned)
-  - Same monthly split (seed=43)
+  - Same RAG features (Qdrant macro-conditioned), TRAIN-ONLY index (no leak)
+  - Chronological 70/15/15 split (earliest→train, latest→test, no lookahead)
   - Same threshold search (MIN_PRECISION=0.20, fallback=0.50)
+  - Naive baselines reported alongside model metrics
 
 Usage:
     python xgboost_v9.py                 # train + evaluate
@@ -306,7 +307,12 @@ def build_features(df: pd.DataFrame, train_idx: np.ndarray, skip_rag: bool = Fal
     else:
         from pipeline.rag_news import build_rag_features_qdrant
         ch_rates = df.iloc[train_idx].groupby("channel")["is_impactful_15m"].mean().to_dict()
-        rag, _   = build_rag_features_qdrant(df, channel_impact_rates=ch_rates)
+        # train_idx passed + rebuild=True → index contains ONLY training rows,
+        # so val/test outcomes can never leak into any row's RAG features.
+        rag, _   = build_rag_features_qdrant(
+            df, channel_impact_rates=ch_rates,
+            train_idx=train_idx, rebuild=True,
+        )
         print(f"  RAG      : {rag.shape[1]} dims")
 
     X = np.hstack([cb_emb, fb_emb, sent_df, type_probs, macro, rag]).astype(np.float32)
@@ -338,7 +344,7 @@ def build_features(df: pd.DataFrame, train_idx: np.ndarray, skip_rag: bool = Fal
 def train_xgboost_models(X_tr, X_vl,
                           y_c15_tr, y_c15_vl,
                           y_c1h_tr, y_c1h_vl,
-                          y_r15_tr, y_r1h_tr):
+                          y_r15_tr, y_r15_vl):
     try:
         import xgboost as xgb
     except ImportError:
@@ -394,7 +400,10 @@ def train_xgboost_models(X_tr, X_vl,
     reg_params["eval_metric"] = "rmse"
     print("  Training reg_15m...")
     reg_15m = xgb.XGBRegressor(**reg_params, objective="reg:squarederror")
-    reg_15m.fit(X_tr, y_r15_tr, eval_set=[(X_vl, y_r15_tr[:len(X_vl)])], verbose=False)
+    # Correct eval set: validation features paired with validation labels.
+    # (Previously this paired X_vl with a slice of TRAIN labels, which is
+    #  meaningless and broke early-stopping for the regressor.)
+    reg_15m.fit(X_tr, y_r15_tr, eval_set=[(X_vl, y_r15_vl)], verbose=False)
 
     return clf_15m, clf_1h, reg_15m
 
@@ -493,6 +502,47 @@ def print_comparison(xgb_results: dict):
         print(f"  🤝 TIE")
 
 
+def evaluate_baselines(y_tr_cls: np.ndarray, y_te_cls: np.ndarray,
+                       y_te_change: np.ndarray, label: str = "15m") -> dict:
+    """Naive baselines the model MUST beat to be meaningful.
+
+    - majority : always predict the majority training class
+    - random   : predict positive at the training positive rate (expected F1)
+    - always_pos: predict everything impactful (recall=1, precision=base rate)
+
+    Reports F1 so it is directly comparable to the model's F1.
+    """
+    pos_rate = float((y_tr_cls == 1).mean())
+    base_rate_te = float((y_te_cls == 1).mean())
+
+    # Majority class
+    majority_pred = np.zeros_like(y_te_cls) if pos_rate < 0.5 else np.ones_like(y_te_cls)
+    maj_f1 = f1_score(y_te_cls, majority_pred, zero_division=0)
+
+    # Always-positive
+    pos_pred = np.ones_like(y_te_cls)
+    pos_f1 = f1_score(y_te_cls, pos_pred, zero_division=0)
+
+    # Random at training prior (expected F1 = base_rate for this scheme)
+    rng = np.random.default_rng(MONTHLY_SEED)
+    rand_pred = (rng.random(len(y_te_cls)) < pos_rate).astype(int)
+    rand_f1 = f1_score(y_te_cls, rand_pred, zero_division=0)
+
+    out = {
+        "majority_f1": float(maj_f1),
+        "always_positive_f1": float(pos_f1),
+        "random_prior_f1": float(rand_f1),
+        "test_base_rate": base_rate_te,
+    }
+    print(f"\n  ── BASELINES ({label}) ──")
+    print(f"    Test base rate (positives): {base_rate_te:.3f}")
+    print(f"    Majority-class F1 : {maj_f1:.3f}")
+    print(f"    Always-positive F1: {pos_f1:.3f}")
+    print(f"    Random-prior F1   : {rand_f1:.3f}")
+    print(f"    → Model F1 must beat ALL of these to mean anything.")
+    return out
+
+
 def print_feature_importance(clf_15m, feat_names: list, top_n: int = 20):
     importances = clf_15m.feature_importances_
     pairs = sorted(zip(feat_names, importances), key=lambda x: -x[1])
@@ -527,22 +577,29 @@ def main():
 
     df = load_data()
 
-    print(f"\n[3/7] MONTHLY RANDOM SPLIT (seed={MONTHLY_SEED})")
-    df["_ym"]  = df["published"].dt.to_period("M")
-    months     = sorted(df["_ym"].unique())
-    rng        = np.random.default_rng(MONTHLY_SEED)
-    shuffled   = np.array(months, dtype=object)
-    rng.shuffle(shuffled)
-    n_tr  = int(len(months) * 0.70)
-    n_val = int(len(months) * 0.15)
-    train_m = set(shuffled[:n_tr])
-    val_m   = set(shuffled[n_tr:n_tr + n_val])
-    test_m  = set(shuffled[n_tr + n_val:])
-    tri     = np.where(df["_ym"].isin(train_m))[0]
-    vi      = np.where(df["_ym"].isin(val_m))[0]
-    te_idx  = np.where(df["_ym"].isin(test_m))[0]
-    df.drop(columns=["_ym"], inplace=True)
+    print(f"\n[3/7] CHRONOLOGICAL SPLIT (70/15/15 by time)")
+    # df is already sorted by `published` ascending in load_data().
+    # A true chronological split: earliest 70% -> train, next 15% -> val,
+    # most recent 15% -> test. This is what guarantees "no lookahead":
+    # the model is only ever validated/tested on news that occurred AFTER
+    # everything it was trained on. The previous random monthly shuffle
+    # leaked future regimes into training and contradicted the README.
+    n          = len(df)
+    n_tr       = int(n * 0.70)
+    n_val      = int(n * 0.15)
+    tri        = np.arange(0, n_tr)
+    vi         = np.arange(n_tr, n_tr + n_val)
+    te_idx     = np.arange(n_tr + n_val, n)
+
+    # Hard guarantee: no temporal overlap across splits.
+    t_train_max = df["published"].iloc[tri].max()
+    t_val_min   = df["published"].iloc[vi].min()
+    t_val_max   = df["published"].iloc[vi].max()
+    t_test_min  = df["published"].iloc[te_idx].min()
+    assert t_train_max <= t_val_min, "Train/val temporal overlap — split is not chronological"
+    assert t_val_max   <= t_test_min, "Val/test temporal overlap — split is not chronological"
     print(f"  Train: {len(tri):,} | Val: {len(vi):,} | Test: {len(te_idx):,}")
+    print(f"  Train ≤ {t_train_max}  <  Val ≤ {t_val_max}  <  Test starts {t_test_min}")
 
     (X, feat_names,
      y_r15, y_c15, y_r1h, y_c1h, y_dir) = build_features(df, tri, skip_rag=args.skip_rag)
@@ -567,7 +624,7 @@ def main():
             X_tr, X_vl,
             y_c15[tri], y_c15[vi],
             y_c1h[tri], y_c1h[vi],
-            y_r15[tri], y_r1h[tri],
+            y_r15[tri], y_r15[vi],
         )
         clf_15m.save_model(clf15_path)
         clf_1h.save_model(clf1h_path)
@@ -595,6 +652,13 @@ def main():
     r15 = eval_horizon("15-minute", p15_te, thr_15m, y_c15[te_idx], r15_te, y_r15[te_idx])
     r1h = eval_horizon("1-hour",    p1h_te, thr_1h,  y_c1h[te_idx], r15_te, y_r1h[te_idx])
 
+    base_15 = evaluate_baselines(y_c15[tri], y_c15[te_idx], y_r15[te_idx], "15m")
+    base_1h = evaluate_baselines(y_c1h[tri], y_c1h[te_idx], y_r1h[te_idx], "1h")
+    if r15["F1"] <= max(base_15["majority_f1"], base_15["always_positive_f1"], base_15["random_prior_f1"]):
+        print("  ⚠️  15m model does NOT beat naive baselines — result is not meaningful.")
+    if r1h["F1"] <= max(base_1h["majority_f1"], base_1h["always_positive_f1"], base_1h["random_prior_f1"]):
+        print("  ⚠️  1h model does NOT beat naive baselines — result is not meaningful.")
+
     dir_acc = accuracy_score(y_dir[te_idx], dir_pred)
     dir_f1  = f1_score(y_dir[te_idx], dir_pred, zero_division=0)
     print(f"\n  Direction: Acc={dir_acc:.1%}  F1={dir_f1:.3f}")
@@ -605,6 +669,9 @@ def main():
         "direction": {"Acc": float(dir_acc), "F1": float(dir_f1)},
         "threshold_15m": float(thr_15m),
         "threshold_1h":  float(thr_1h),
+        "baselines_15m": base_15,
+        "baselines_1h":  base_1h,
+        "split": "chronological_70_15_15",
     }
     with open(XGB_RESULTS_PATH, "w") as f:
         json.dump(xgb_results, f, indent=2)

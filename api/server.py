@@ -3,6 +3,7 @@ API server — read-only, JSON cache mode.
 Loads news_cache.json on startup and serves it.
 No live bot, no ingestion, no broadcasting.
 """
+import os
 import re
 import sys
 import csv
@@ -16,7 +17,7 @@ from collections import defaultdict, Counter
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))   # make project root importable
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -345,10 +346,20 @@ async def lifespan(_app):
 
 # ── App setup ─────────────────────────────────────────────────────
 app = FastAPI(title="Crypto News API", version="2.0", lifespan=lifespan)
+
+# CORS: restrict to configured frontend origins. Defaults to localhost dev
+# ports. Set ALLOWED_ORIGINS (comma-separated) in .env for deployment.
+# Using "*" here is unsafe because the API exposes a write endpoint.
+_allowed_origins = [
+    o.strip() for o in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:5173,http://localhost:3000",
+    ).split(",") if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=_allowed_origins,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -430,9 +441,23 @@ async def ws_hot(ws: WebSocket):
 
 
 # ── REST — news ────────────────────────────────────────────────────
+_INGEST_API_KEY = os.getenv("INGEST_API_KEY", "")
+
+
 @app.post("/news")
-async def ingest_news(item: dict):
-    """Receive a scored news item from main.py and persist it to the cache."""
+async def ingest_news(item: dict, x_api_key: str = Header(default="")):
+    """Receive a scored news item from main.py and persist it to the cache.
+
+    This is a WRITE endpoint (it mutates the cache and broadcasts to every
+    connected dashboard), so it requires a shared secret. Set INGEST_API_KEY
+    in .env and send it as the X-API-Key header. If INGEST_API_KEY is unset,
+    the endpoint is disabled (fails closed) to avoid an open write surface.
+    """
+    if not _INGEST_API_KEY:
+        raise HTTPException(status_code=503, detail="Ingest disabled: INGEST_API_KEY not configured")
+    if x_api_key != _INGEST_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+
     global all_news, hot_news, _idf_cache
 
     # Normalise channel name

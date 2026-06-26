@@ -375,8 +375,12 @@ def should_display_in_all(model_score, model_score_1h, confidence, title=""):
 async def send_to_dashboard(payload: dict):
     """Send signal to dashboard ALL feed."""
     try:
+        headers = {}
+        _key = os.getenv("INGEST_API_KEY", "")
+        if _key:
+            headers["X-API-Key"] = _key
         async with httpx.AsyncClient() as client:
-            await client.post(f"{DASHBOARD_API}/news", json=payload, timeout=3)
+            await client.post(f"{DASHBOARD_API}/news", json=payload, headers=headers, timeout=3)
     except Exception as e:
         print(f"  ⚠️  Dashboard API error: {e}")
 
