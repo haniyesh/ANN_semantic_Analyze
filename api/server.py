@@ -1076,13 +1076,29 @@ Do NOT repeat the numbers — explain the REASONING behind them."""
 
 
 # ── Binance proxy (chart data) ─────────────────────────────────────
+# Strict allowlists prevent this proxy from being used as an open relay /
+# SSRF vector: symbol and interval are interpolated into outbound URLs, so
+# only known-good values are permitted.
+_ALLOWED_SYMBOLS = {"BTCUSDT", "ETHUSDT"}
+_ALLOWED_INTERVALS = {
+    "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h",
+    "1d", "3d", "1w", "1M",
+}
+
+
 @app.get("/proxy/klines")
 async def proxy_klines(symbol: str = "BTCUSDT", interval: str = "1h",
                        limit: int = 200, startTime: int = None):
+    symbol = symbol.upper()
+    if symbol not in _ALLOWED_SYMBOLS:
+        raise HTTPException(status_code=400, detail=f"symbol not allowed: {symbol}")
+    if interval not in _ALLOWED_INTERVALS:
+        raise HTTPException(status_code=400, detail=f"interval not allowed: {interval}")
+    limit = max(1, min(int(limit), 1000))
     url = (f"https://api.binance.com/api/v3/klines"
-           f"?symbol={symbol}&interval={interval}&limit={min(limit,1000)}")
+           f"?symbol={symbol}&interval={interval}&limit={limit}")
     if startTime:
-        url += f"&startTime={startTime}"
+        url += f"&startTime={int(startTime)}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -1093,6 +1109,9 @@ async def proxy_klines(symbol: str = "BTCUSDT", interval: str = "1h",
 
 @app.websocket("/proxy/stream/{symbol}/{interval}")
 async def proxy_stream(ws: WebSocket, symbol: str, interval: str):
+    if symbol.upper() not in _ALLOWED_SYMBOLS or interval not in _ALLOWED_INTERVALS:
+        await ws.close(code=1008)
+        return
     await ws.accept()
     binance_url = f"wss://stream.binance.com:9443/ws/{symbol.lower()}@kline_{interval}"
     try:
