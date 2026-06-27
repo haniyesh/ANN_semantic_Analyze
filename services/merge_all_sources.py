@@ -139,7 +139,8 @@ def _default_sentiment() -> dict:
 
 
 def _build_row(title, published, channel, btc_now, btc_15m, btc_1h,
-               eth_now, eth_15m, eth_1h, sentiment_dict) -> dict:
+               eth_now, eth_15m, eth_1h, sentiment_dict,
+               timestamp_reliable: bool = True) -> dict:
     ts  = pd.to_datetime(published, utc=True)
     mac = _macro_flags(ts)
 
@@ -162,6 +163,11 @@ def _build_row(title, published, channel, btc_now, btc_15m, btc_1h,
         "word_count":        len(str(title).split()),
         "is_spam":           False,
         "is_relevant":       True,
+        # Sources 2/3 only know the calendar DATE of a headline, so they are
+        # stamped at noon UTC. The +15m/+1h price labels derived from that
+        # fabricated instant are NOT meaningful intraday outcomes. This flag
+        # lets training quarantine those rows (see load_data()).
+        "timestamp_reliable": bool(timestamp_reliable),
         "_hash":             _hash(str(title)),
         "btc_pct_change_15m": pct(btc_now, btc_15m),
         "btc_pct_change_1h":  pct(btc_now, btc_1h),
@@ -214,6 +220,7 @@ def parse_source2() -> pd.DataFrame:
                 "sentiment_raw": None,
                 "channel":      "kaggle_btc_daily",
                 "source_id":    2,
+                "ts_reliable":  False,   # noon-UTC placeholder, not real intraday time
             })
     result = pd.DataFrame(rows)
     result = result.drop_duplicates(subset=["title"])
@@ -245,6 +252,7 @@ def parse_source3() -> pd.DataFrame:
                 "sentiment_raw": None,
                 "channel":      "kaggle_eth_daily",
                 "source_id":    3,
+                "ts_reliable":  False,   # noon-UTC placeholder, not real intraday time
             })
     result = pd.DataFrame(rows)
     result = result.drop_duplicates(subset=["title"])
@@ -302,6 +310,7 @@ def fetch_and_build(df: pd.DataFrame, existing_hashes: set,
             btc_now, btc_15m, btc_1h,
             eth_now, eth_15m, eth_1h,
             sent,
+            timestamp_reliable=bool(r.get("ts_reliable", True)),
         )
         done_rows.append(row)
 

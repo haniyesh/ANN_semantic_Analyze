@@ -307,10 +307,22 @@ async def save_full_news(
     coin: str, category: str, signal: str,
     impact_score: float, published_at: datetime,
 ) -> int | None:
-    """Save news item to database. Returns news_id or None on error."""
-    try:
+    """Save news item to database. Returns news_id or None on error.
+
+    Previously this was a stub that always returned None, so news was never
+    persisted even when the DB was connected. It now delegates to the real
+    save_news() and surfaces (not swallows) the error reason on failure.
+    """
+    if pool is None:
         return None
-    except Exception:
+    try:
+        return await save_news(
+            pool=pool, title=title, link=link, source=source,
+            coin=coin, category=category, signal=signal,
+            impact_score=impact_score, published_at=published_at,
+        )
+    except Exception as e:
+        print(f"  ⚠️  save_full_news failed: {type(e).__name__}: {e}")
         return None
 
 
@@ -375,8 +387,12 @@ def should_display_in_all(model_score, model_score_1h, confidence, title=""):
 async def send_to_dashboard(payload: dict):
     """Send signal to dashboard ALL feed."""
     try:
+        headers = {}
+        _key = os.getenv("INGEST_API_KEY", "")
+        if _key:
+            headers["X-API-Key"] = _key
         async with httpx.AsyncClient() as client:
-            await client.post(f"{DASHBOARD_API}/news", json=payload, timeout=3)
+            await client.post(f"{DASHBOARD_API}/news", json=payload, headers=headers, timeout=3)
     except Exception as e:
         print(f"  ⚠️  Dashboard API error: {e}")
 

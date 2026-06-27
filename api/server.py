@@ -3,6 +3,7 @@ API server — read-only, JSON cache mode.
 Loads news_cache.json on startup and serves it.
 No live bot, no ingestion, no broadcasting.
 """
+import os
 import re
 import sys
 import csv
@@ -16,7 +17,7 @@ from collections import defaultdict, Counter
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))   # make project root importable
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
@@ -345,10 +346,20 @@ async def lifespan(_app):
 
 # ── App setup ─────────────────────────────────────────────────────
 app = FastAPI(title="Crypto News API", version="2.0", lifespan=lifespan)
+
+# CORS: restrict to configured frontend origins. Defaults to localhost dev
+# ports. Set ALLOWED_ORIGINS (comma-separated) in .env for deployment.
+# Using "*" here is unsafe because the API exposes a write endpoint.
+_allowed_origins = [
+    o.strip() for o in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:5173,http://localhost:3000",
+    ).split(",") if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=_allowed_origins,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -430,9 +441,23 @@ async def ws_hot(ws: WebSocket):
 
 
 # ── REST — news ────────────────────────────────────────────────────
+_INGEST_API_KEY = os.getenv("INGEST_API_KEY", "")
+
+
 @app.post("/news")
-async def ingest_news(item: dict):
-    """Receive a scored news item from main.py and persist it to the cache."""
+async def ingest_news(item: dict, x_api_key: str = Header(default="")):
+    """Receive a scored news item from main.py and persist it to the cache.
+
+    This is a WRITE endpoint (it mutates the cache and broadcasts to every
+    connected dashboard), so it requires a shared secret. Set INGEST_API_KEY
+    in .env and send it as the X-API-Key header. If INGEST_API_KEY is unset,
+    the endpoint is disabled (fails closed) to avoid an open write surface.
+    """
+    if not _INGEST_API_KEY:
+        raise HTTPException(status_code=503, detail="Ingest disabled: INGEST_API_KEY not configured")
+    if x_api_key != _INGEST_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
+
     global all_news, hot_news, _idf_cache
 
     # Normalise channel name
@@ -593,9 +618,9 @@ def get_training_stats():
                 ch = row.get("channel", "unknown")
                 channels[ch] = channels.get(ch, 0) + 1
                 try: weights.append(float(row["weight"]))
-                except: pass
+                except (ValueError, KeyError, TypeError): pass
                 try: confidences.append(float(row["confidence"]))
-                except: pass
+                except (ValueError, KeyError, TypeError): pass
                 try:
                     bp   = float(row["btc_price_at_news"])
                     b15  = float(row["btc_price_15m"])
@@ -606,7 +631,7 @@ def get_training_stats():
                     btc_1h.append(round(c1h, 4))
                     if abs(c15) >= 0.3: impact_15m += 1
                     if abs(c1h) >= 0.5: impact_1h  += 1
-                except: pass
+                except (ValueError, KeyError, TypeError, ZeroDivisionError): pass
 
         def avg(lst): return round(sum(lst) / len(lst), 4) if lst else 0
         def pct(n):   return round(n / total * 100, 1)     if total else 0
@@ -665,7 +690,7 @@ def get_category_stats():
                 elif "FP" in r: s["fp"] += 1
                 elif "FN" in r: s["fn"] += 1
                 try:   s["scores"].append(float(row["model_score"]))
-                except: pass
+                except (ValueError, KeyError, TypeError): pass
 
     result = []
     for nt in set(list(train_counts.keys()) + list(test_stats.keys())):
@@ -746,7 +771,7 @@ def get_report_summary():
                     c1h = (float(row["btc_price_1h"])  - float(row["btc_price_at_news"])) / float(row["btc_price_at_news"]) * 100
                     if abs(c15) >= 0.3: train["impactful_15m_count"] += 1
                     if abs(c1h) >= 0.5: train["impactful_1h_count"]  += 1
-                except: pass
+                except (ValueError, KeyError, TypeError, ZeroDivisionError): pass
         n = train["total_filtered"] or 1
         train["impactful_15m_pct"] = round(train["impactful_15m_count"] / n * 100, 1)
         train["impactful_1h_pct"]  = round(train["impactful_1h_count"]  / n * 100, 1)
@@ -1051,13 +1076,29 @@ Do NOT repeat the numbers — explain the REASONING behind them."""
 
 
 # ── Binance proxy (chart data) ─────────────────────────────────────
+# Strict allowlists prevent this proxy from being used as an open relay /
+# SSRF vector: symbol and interval are interpolated into outbound URLs, so
+# only known-good values are permitted.
+_ALLOWED_SYMBOLS = {"BTCUSDT", "ETHUSDT"}
+_ALLOWED_INTERVALS = {
+    "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h",
+    "1d", "3d", "1w", "1M",
+}
+
+
 @app.get("/proxy/klines")
 async def proxy_klines(symbol: str = "BTCUSDT", interval: str = "1h",
                        limit: int = 200, startTime: int = None):
+    symbol = symbol.upper()
+    if symbol not in _ALLOWED_SYMBOLS:
+        raise HTTPException(status_code=400, detail=f"symbol not allowed: {symbol}")
+    if interval not in _ALLOWED_INTERVALS:
+        raise HTTPException(status_code=400, detail=f"interval not allowed: {interval}")
+    limit = max(1, min(int(limit), 1000))
     url = (f"https://api.binance.com/api/v3/klines"
-           f"?symbol={symbol}&interval={interval}&limit={min(limit,1000)}")
+           f"?symbol={symbol}&interval={interval}&limit={limit}")
     if startTime:
-        url += f"&startTime={startTime}"
+        url += f"&startTime={int(startTime)}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -1068,6 +1109,9 @@ async def proxy_klines(symbol: str = "BTCUSDT", interval: str = "1h",
 
 @app.websocket("/proxy/stream/{symbol}/{interval}")
 async def proxy_stream(ws: WebSocket, symbol: str, interval: str):
+    if symbol.upper() not in _ALLOWED_SYMBOLS or interval not in _ALLOWED_INTERVALS:
+        await ws.close(code=1008)
+        return
     await ws.accept()
     binance_url = f"wss://stream.binance.com:9443/ws/{symbol.lower()}@kline_{interval}"
     try:
@@ -1082,7 +1126,7 @@ async def proxy_stream(ws: WebSocket, symbol: str, interval: str):
         pass
     finally:
         try: await ws.close()
-        except: pass
+        except Exception: pass
 
 
 # ── Custom news analyzer ──────────────────────────────────────────
