@@ -115,22 +115,32 @@ def save_groq_cache(cache: dict):
         json.dump(cache, f)
 
 
+def _get_groq_clients():
+    """Return list of OpenAI clients, one per available Groq API key."""
+    from openai import OpenAI
+    keys = []
+    for env in ["GROQ_API_KEY", "GROQ_API_KEY_2", "GROQ_API_KEY_3"]:
+        k = os.environ.get(env)
+        if k and k not in keys:
+            keys.append(k)
+    if not keys:
+        return []
+    return [OpenAI(api_key=k, base_url="https://api.groq.com/openai/v1") for k in keys]
+
+
 def compute_groq_sentiment(titles: list[str], groq_limit: int = None) -> dict:
     """
-    Call Groq API for titles not yet in cache. Saves results incrementally.
+    Call Groq API for titles not yet in cache. Rotates between all available
+    API keys to multiply effective rate limit. Saves results incrementally.
     Returns full cache dict {md5_key: label}.
     """
-    key = os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY_2")
-    if not key:
-        print("  ⚠ GROQ_API_KEY not set — skipping Groq API calls, using 'neutral' fallback")
+    clients = _get_groq_clients()
+    if not clients:
+        print("  ⚠ No GROQ_API_KEY found — using 'neutral' fallback")
         return {}
 
-    from openai import OpenAI
-    client = OpenAI(api_key=key, base_url="https://api.groq.com/openai/v1")
-
-    cache     = load_groq_cache()
-    to_fetch  = [t for t in titles if _title_key(t) not in cache]
-
+    cache    = load_groq_cache()
+    to_fetch = [t for t in titles if _title_key(t) not in cache]
     if groq_limit:
         to_fetch = to_fetch[:groq_limit]
 
@@ -138,48 +148,61 @@ def compute_groq_sentiment(titles: list[str], groq_limit: int = None) -> dict:
         print(f"  Groq cache: {len(cache):,} entries, all titles cached")
         return cache
 
+    n_keys   = len(clients)
+    eff_rpm  = GROQ_RPM * n_keys
+    interval = 60.0 / eff_rpm
     print(f"  Groq cache: {len(cache):,} cached, {len(to_fetch):,} new to fetch")
-    print(f"  Model: {GROQ_MODEL}  Rate limit: {GROQ_RPM} req/min")
+    print(f"  Model: {GROQ_MODEL}  Keys: {n_keys}  Effective rate: {eff_rpm} req/min")
 
-    interval = 60.0 / GROQ_RPM
-    errors   = 0
+    errors = 0
+    # Track per-key cooldowns after rate-limit hits
+    key_cooldown = [0.0] * n_keys
 
     for i, title in enumerate(to_fetch):
         if i % 100 == 0 and i > 0:
             print(f"    … {i}/{len(to_fetch)}  errors={errors}", flush=True)
 
+        # Pick client: round-robin, skip keys in cooldown
+        ki     = i % n_keys
+        now    = time.time()
+        for attempt in range(n_keys):
+            idx = (ki + attempt) % n_keys
+            if now >= key_cooldown[idx]:
+                ki = idx
+                break
+
+        label = "neutral"
         try:
-            r = client.chat.completions.create(
-                model=GROQ_MODEL,
-                max_tokens=5,
-                temperature=0,
+            r = clients[ki].chat.completions.create(
+                model=GROQ_MODEL, max_tokens=5, temperature=0,
                 messages=[{"role": "user", "content": PROMPT_TEMPLATE.format(title=title)}],
             )
             label = _normalize(r.choices[0].message.content.strip())
         except Exception as e:
-            # Handle rate limit with backoff
-            if "rate_limit" in str(e).lower() or "429" in str(e):
-                print(f"\n    Rate limit hit at {i}, sleeping 60s...")
-                time.sleep(60)
-                try:
-                    r = client.chat.completions.create(
-                        model=GROQ_MODEL, max_tokens=5, temperature=0,
-                        messages=[{"role": "user", "content": PROMPT_TEMPLATE.format(title=title)}],
-                    )
-                    label = _normalize(r.choices[0].message.content.strip())
-                except Exception:
-                    label = "neutral"
+            err_str = str(e).lower()
+            if "rate_limit" in err_str or "429" in err_str:
+                print(f"\n    Key[{ki}] rate limit at {i}, cooling 60s...")
+                key_cooldown[ki] = time.time() + 60
+                # Retry immediately with another key
+                alt = (ki + 1) % n_keys
+                if alt != ki:
+                    try:
+                        r = clients[alt].chat.completions.create(
+                            model=GROQ_MODEL, max_tokens=5, temperature=0,
+                            messages=[{"role": "user", "content": PROMPT_TEMPLATE.format(title=title)}],
+                        )
+                        label = _normalize(r.choices[0].message.content.strip())
+                    except Exception:
+                        errors += 1
+                else:
+                    time.sleep(60)
                     errors += 1
             else:
-                label = "neutral"
                 errors += 1
 
         cache[_title_key(title)] = label
-
-        # Save every 200 entries
         if (i + 1) % 200 == 0:
             save_groq_cache(cache)
-
         time.sleep(interval)
 
     save_groq_cache(cache)
@@ -421,7 +444,10 @@ def build_features(df: pd.DataFrame, train_idx: np.ndarray,
     else:
         from pipeline.rag_news import build_rag_features_qdrant
         ch_rates = df.iloc[train_idx].groupby("channel")["is_impactful_15m"].mean().to_dict()
-        rag, _   = build_rag_features_qdrant(df, channel_impact_rates=ch_rates)
+        rag, _   = build_rag_features_qdrant(
+            df, channel_impact_rates=ch_rates,
+            train_idx=train_idx, rebuild=True,
+        )
         print(f"  RAG      : {rag.shape[1]} dims")
 
     X = np.hstack([cb_emb, fb_emb, sent_feats, type_probs, macro, rag]).astype(np.float32)
@@ -620,22 +646,23 @@ def main():
         df = df.head(args.groq_sample).reset_index(drop=True)
         print(f"  Using first {len(df):,} rows (--groq-sample)")
 
-    print(f"\n[3/7] MONTHLY RANDOM SPLIT (seed={MONTHLY_SEED})")
-    df["_ym"]  = df["published"].dt.to_period("M")
-    months     = sorted(df["_ym"].unique())
-    rng        = np.random.default_rng(MONTHLY_SEED)
-    shuffled   = np.array(months, dtype=object)
-    rng.shuffle(shuffled)
-    n_tr  = int(len(months) * 0.70)
-    n_val = int(len(months) * 0.15)
-    train_m = set(shuffled[:n_tr])
-    val_m   = set(shuffled[n_tr:n_tr + n_val])
-    test_m  = set(shuffled[n_tr + n_val:])
-    tri    = np.where(df["_ym"].isin(train_m))[0]
-    vi     = np.where(df["_ym"].isin(val_m))[0]
-    te_idx = np.where(df["_ym"].isin(test_m))[0]
-    df.drop(columns=["_ym"], inplace=True)
-    print(f"  Train: {len(tri):,} | Val: {len(vi):,} | Test: {len(te_idx):,}")
+    print(f"\n[3/7] CHRONOLOGICAL SPLIT (70/15/15)")
+    # True chronological: earliest 70% = train, next 15% = val, latest 15% = test.
+    # Data is already sorted by published in load_data().
+    n = len(df)
+    n_tr  = int(n * 0.70)
+    n_val = int(n * 0.15)
+    tri    = np.arange(0, n_tr)
+    vi     = np.arange(n_tr, n_tr + n_val)
+    te_idx = np.arange(n_tr + n_val, n)
+
+    # Sanity check: no temporal leakage
+    train_max = df.iloc[tri]["published"].max()
+    val_min   = df.iloc[vi]["published"].min()
+    assert train_max <= val_min, f"Train/val overlap: train_max={train_max} > val_min={val_min}"
+    print(f"  Train: {len(tri):,} [{df.iloc[0]['published'].date()} → {train_max.date()}]")
+    print(f"  Val:   {len(vi):,}  [{val_min.date()} → {df.iloc[vi[-1]]['published'].date()}]")
+    print(f"  Test:  {len(te_idx):,}  [{df.iloc[te_idx[0]]['published'].date()} → {df.iloc[-1]['published'].date()}]")
 
     (X, feat_names,
      y_r15, y_c15, y_r1h, y_c1h, y_dir) = build_features(

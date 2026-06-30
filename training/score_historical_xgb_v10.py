@@ -56,7 +56,7 @@ CLF1H_PATH   = str(XGB_MODEL_BASE) + "_clf1h.json"
 SCALER_PATH  = str(XGB_MODEL_BASE) + "_scaler.pkl"
 RESULTS_PATH = ROOT / "xgboost_v10_groq_results.json"
 MONTHLY_SEED = 43
-MONTHS_WINDOW = 3   # last 3 months only
+MONTHS_WINDOW = 1   # last 1 month only
 
 
 # ── 1. Load CSV ──────────────────────────────────────────────────
@@ -243,15 +243,20 @@ def to_cache_items(df: pd.DataFrame, p15: np.ndarray, p1h: np.ndarray,
     return items
 
 
-# ── 7. Preserve live items from existing cache ───────────────────
+# ── 7. Preserve live items from existing cache (last 1 month only) ──
 def load_live_cache() -> list:
     if not CACHE_FILE.exists():
         return []
     try:
+        from datetime import timezone
         data  = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
         items = data if isinstance(data, list) else data.get("news", [])
         HIST_SOURCES = {"historical_v6", "historical_v8", "historical_xgb_v9", "historical_xgb_v10"}
-        return [x for x in items if x.get("source") not in HIST_SOURCES]
+        cutoff_ts = (datetime.now(timezone.utc) - pd.DateOffset(months=MONTHS_WINDOW)).timestamp()
+        live = [x for x in items
+                if x.get("source") not in HIST_SOURCES
+                and (x.get("published_ts") or 0) >= cutoff_ts]
+        return live
     except Exception:
         return []
 

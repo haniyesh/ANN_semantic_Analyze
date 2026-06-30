@@ -445,6 +445,8 @@ def _process_one_row(
         )]),
         limit=top_k,
     )
+    # Apply same similarity floor as live inference (query_single)
+    results = [r for r in results if r.score >= SIMILARITY_THRESHOLD]
 
     if not results:
         return i, np.zeros(10, dtype=np.float32), {"similar_news": [], "macro_weights": []}
@@ -483,11 +485,15 @@ def build_rag_features_qdrant(
     channel_impact_rates: dict,
     top_k: int = TOP_K,
     rebuild: bool = False,
+    train_idx: np.ndarray = None,
 ) -> tuple[np.ndarray, list[dict]]:
     """
     Builds 10-dim macro-reweighted RAG feature array for every row in df.
     Uses 5 macro features: is_weekend, is_low_liquidity, is_us_hours,
     is_asia_hours, fomc_week (from compute_macro.py or computed on-the-fly).
+
+    IMPORTANT: Only training rows are indexed in Qdrant to prevent data leakage.
+    If train_idx is provided, only those rows are uploaded to the vector index.
 
     Time-safe: row i only retrieves news with timestamp < row i's timestamp.
     Parallel: 16 threads, ~20-30 min for 14k rows.
@@ -504,7 +510,14 @@ def build_rag_features_qdrant(
 
     already_exists = setup_collection(client)
     existing_ids   = get_existing_ids(client) if already_exists else set()
-    upload_vectors(df, client, existing_ids)
+
+    # Only index training rows to prevent label leakage from val/test
+    if train_idx is not None:
+        train_df = df.iloc[train_idx].copy()
+        print(f"  RAG: indexing {len(train_df):,} TRAIN-ONLY rows (leak prevention)")
+        upload_vectors(train_df, client, existing_ids)
+    else:
+        upload_vectors(df, client, existing_ids)
 
     n          = len(df)
     def _safe_ts(val):

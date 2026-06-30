@@ -141,9 +141,14 @@ def batch_bert(titles: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     cb_cls  = AutoModelForSequenceClassification.from_pretrained("ElKulako/cryptobert").eval()
     cb_base = AutoModel.from_pretrained("ElKulako/cryptobert").eval()
 
-    print("  Loading FinBERT...")
+    print("  Loading FinBERT (classifier + base)...")
     fb_tok  = AutoTokenizer.from_pretrained("ProsusAI/finbert")
     fb_base = AutoModel.from_pretrained("ProsusAI/finbert").eval()
+    fb_cls  = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert").eval()
+
+    print("  Loading RoBERTa-sentiment...")
+    rb_tok = AutoTokenizer.from_pretrained("cardiffnlp/twitter-roberta-base-sentiment-latest")
+    rb_cls = AutoModelForSequenceClassification.from_pretrained("cardiffnlp/twitter-roberta-base-sentiment-latest").eval()
 
     import torch
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -152,14 +157,16 @@ def batch_bert(titles: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     cb_cls  = cb_cls.to(device)
     cb_base = cb_base.to(device)
     fb_base = fb_base.to(device)
+    fb_cls  = fb_cls.to(device)
+    rb_cls  = rb_cls.to(device)
 
-    cb_embs, cb_probs_list, fb_embs = [], [], []
+    cb_embs, cb_probs_list, fb_embs, fb_probs_list, rb_probs_list = [], [], [], [], []
 
     print(f"  Encoding {len(titles):,} titles...")
     for start in range(0, len(titles), BATCH):
         batch = titles[start: start + BATCH]
 
-        # CryptoBERT
+        # CryptoBERT — embedding + classifier
         inp_cb = cb_tok(batch, padding=True, truncation=True,
                         max_length=128, return_tensors="pt")
         inp_cb = {k: v.to(device) for k, v in inp_cb.items()}
@@ -169,13 +176,25 @@ def batch_bert(titles: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         cb_embs.append(cb_emb)
         cb_probs_list.append(cb_prob)
 
-        # FinBERT
-        inp_fb = fb_tok(batch, padding=True, truncation=True,
+        # FinBERT — embedding + classifier
+        fb_batch = [f"Bitcoin crypto market: {t}" for t in batch]
+        inp_fb = fb_tok(fb_batch, padding=True, truncation=True,
                         max_length=128, return_tensors="pt")
         inp_fb = {k: v.to(device) for k, v in inp_fb.items()}
         with torch.no_grad():
-            fb_emb = fb_base(**inp_fb).last_hidden_state[:, 0, :].cpu().numpy()
+            fb_emb  = fb_base(**inp_fb).last_hidden_state[:, 0, :].cpu().numpy()
+            fb_prob = torch.softmax(fb_cls(**inp_fb).logits, dim=1).cpu().numpy()
         fb_embs.append(fb_emb)
+        fb_probs_list.append(fb_prob)
+
+        # RoBERTa — classifier only (no embedding needed)
+        rb_batch = [f"BREAKING: {t} #Bitcoin #Crypto" for t in batch]
+        inp_rb = rb_tok(rb_batch, padding=True, truncation=True,
+                        max_length=128, return_tensors="pt")
+        inp_rb = {k: v.to(device) for k, v in inp_rb.items()}
+        with torch.no_grad():
+            rb_prob = torch.softmax(rb_cls(**inp_rb).logits, dim=1).cpu().numpy()
+        rb_probs_list.append(rb_prob)
 
         done = min(start + BATCH, len(titles))
         if done % 500 == 0 or done == len(titles):
@@ -183,29 +202,43 @@ def batch_bert(titles: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
     return (np.vstack(cb_embs).astype(np.float32),
             np.vstack(fb_embs).astype(np.float32),
-            np.vstack(cb_probs_list).astype(np.float32))
+            np.vstack(cb_probs_list).astype(np.float32),
+            np.vstack(fb_probs_list).astype(np.float32),
+            np.vstack(rb_probs_list).astype(np.float32))
 
 
 # ── 3. Build XGBoost v9 features ─────────────────────────────────
 
-def build_features(msgs, cb_emb, fb_emb, cb_probs) -> np.ndarray:
+def build_features(msgs, cb_emb, fb_emb, cb_probs, fb_probs, rb_probs) -> np.ndarray:
     from xgboost_v9 import crypto_news_type_classify, NEWS_TYPE_LABELS
 
     n = len(msgs)
 
-    # Proxy ensemble: all 3 models = CryptoBERT probs [neg, neu, pos]
-    p_neg = cb_probs[:, 0]
-    p_neu = cb_probs[:, 1]
-    p_pos = cb_probs[:, 2]
+    # CryptoBERT probs [neg, neu, pos]
+    cb_neg, cb_neu, cb_pos = cb_probs[:, 0], cb_probs[:, 1], cb_probs[:, 2]
+
+    # FinBERT probs — label order: [positive, negative, neutral]
+    fb_pos, fb_neg, fb_neu = fb_probs[:, 0], fb_probs[:, 1], fb_probs[:, 2]
+
+    # RoBERTa probs — label order: [negative, neutral, positive]
+    rb_neg, rb_neu, rb_pos = rb_probs[:, 0], rb_probs[:, 1], rb_probs[:, 2]
+
+    # Net agreement: mean of per-model (pos-neg) scaled by sign agreement
+    nets = np.column_stack([cb_pos - cb_neg, fb_pos - fb_neg, rb_pos - rb_neg])
+    mean_net = nets.mean(axis=1)
+    avg_pos = (cb_pos + fb_pos + rb_pos) / 3
+    avg_neg = (cb_neg + fb_neg + rb_neg) / 3
+    avg_neu = (cb_neu + fb_neu + rb_neu) / 3
+    conf = np.maximum(avg_pos, np.maximum(avg_neg, avg_neu))
 
     sent_arr = np.column_stack([
-        p_pos, p_neg, p_neu,        # cb
-        p_pos, p_neg, p_neu,        # fb proxy
-        p_pos, p_neg, p_neu,        # rb proxy
-        p_pos - p_neg,              # net_agreement
-        p_pos - p_neg,              # sentiment_score proxy
-        np.full(n, 6.0),            # weight
-        np.maximum(p_pos, np.maximum(p_neg, p_neu)),  # confidence
+        cb_pos, cb_neg, cb_neu,     # cb
+        fb_pos, fb_neg, fb_neu,     # fb (actual)
+        rb_pos, rb_neg, rb_neu,     # rb (actual)
+        mean_net,                   # net_agreement
+        mean_net,                   # sentiment_score proxy
+        np.full(n, 6.0),           # weight
+        conf,                       # confidence
     ]).astype(np.float32)           # 13 dims
 
     # News-type probs (11)
@@ -216,16 +249,21 @@ def build_features(msgs, cb_emb, fb_emb, cb_probs) -> np.ndarray:
     dow = np.array([m["pub_dt"].weekday() for m in msgs], dtype=np.float32)
     fomc = np.array([int(m["pub_dt"].date() in _FOMC_SET) for m in msgs], dtype=np.float32)
 
+    # Price context: btc_vol (rolling std of returns), btc_mom (rolling mean), fear_greed
+    # These match xgboost_v9 training's compute_price_context function
+    # For batch historical scoring, we approximate using the available price data
+    # TODO: compute actual rolling vol/mom from kline data for full parity
     macro = np.column_stack([
         (dow >= 5).astype(np.float32),          # weekend
         ((h >= 2) & (h <= 6)).astype(np.float32),   # low liq
         ((h >= 13) & (h <= 21)).astype(np.float32),  # us hours
         ((h >= 0) & (h <= 8)).astype(np.float32),    # asia
         fomc,
-        np.zeros(n), np.zeros(n), np.zeros(n),   # btc_vol, btc_mom, fear_greed
+        np.zeros(n), np.zeros(n), np.full(n, 0.5),  # btc_vol, btc_mom, fear_greed=0.5 neutral
     ]).astype(np.float32)           # 8 dims
 
-    # RAG = zeros (10 dims)
+    # RAG = zeros (10 dims) — RAG features require Qdrant query per item
+    # For batch scoring this is a known approximation
     rag = np.zeros((n, 10), dtype=np.float32)
 
     # 768+768+13+11+8+10 = 1578
@@ -343,7 +381,7 @@ def to_cache_items(msgs, cb_probs, p15, p1h, thr15, thr1h):
 
 # ── 7. Convert to training CSV rows ──────────────────────────────
 
-def to_training_rows(msgs, cb_probs, btc_map, eth_map):
+def to_training_rows(msgs, cb_probs, fb_probs, rb_probs, btc_map, eth_map):
     train = pd.read_csv(CSV_PATH, low_memory=False, nrows=0)
     existing_keys = set(zip(
         pd.read_csv(CSV_PATH, low_memory=False)["title"].str.strip().str.lower().fillna(""),
@@ -365,9 +403,18 @@ def to_training_rows(msgs, cb_probs, btc_map, eth_map):
         if not btc15 or not btc1h:
             continue
 
-        p_neg, p_neu, p_pos = float(cb_probs[i,0]), float(cb_probs[i,1]), float(cb_probs[i,2])
-        net    = p_pos - p_neg
-        conf   = round(max(p_pos, p_neg, p_neu), 4)
+        # CryptoBERT: [neg, neu, pos]
+        cb_neg, cb_neu, cb_pos = float(cb_probs[i,0]), float(cb_probs[i,1]), float(cb_probs[i,2])
+        # FinBERT: [positive, negative, neutral]
+        f_pos, f_neg, f_neu = float(fb_probs[i,0]), float(fb_probs[i,1]), float(fb_probs[i,2])
+        # RoBERTa: [negative, neutral, positive]
+        r_neg, r_neu, r_pos = float(rb_probs[i,0]), float(rb_probs[i,1]), float(rb_probs[i,2])
+
+        avg_pos = (cb_pos + f_pos + r_pos) / 3
+        avg_neg = (cb_neg + f_neg + r_neg) / 3
+        avg_neu = (cb_neu + f_neu + r_neu) / 3
+        net    = avg_pos - avg_neg
+        conf   = round(max(avg_pos, avg_neg, avg_neu), 4)
         sent   = "positive" if net > 0.05 else "negative" if net < -0.05 else "neutral"
         h, dow = pub_dt.hour, pub_dt.weekday()
         fomc   = int(pub_dt.date() in _FOMC_SET)
@@ -408,15 +455,15 @@ def to_training_rows(msgs, cb_probs, btc_map, eth_map):
             "is_spam":            False,
             "is_relevant":        True,
             "_hash":              _hash(title),
-            "cb_prob_pos":        round(p_pos, 4),
-            "cb_prob_neg":        round(p_neg, 4),
-            "cb_prob_neu":        round(p_neu, 4),
-            "fb_prob_pos":        round(p_pos, 4),
-            "fb_prob_neg":        round(p_neg, 4),
-            "fb_prob_neu":        round(p_neu, 4),
-            "rb_prob_pos":        round(p_pos, 4),
-            "rb_prob_neg":        round(p_neg, 4),
-            "rb_prob_neu":        round(p_neu, 4),
+            "cb_prob_pos":        round(cb_pos, 4),
+            "cb_prob_neg":        round(cb_neg, 4),
+            "cb_prob_neu":        round(cb_neu, 4),
+            "fb_prob_pos":        round(f_pos, 4),
+            "fb_prob_neg":        round(f_neg, 4),
+            "fb_prob_neu":        round(f_neu, 4),
+            "rb_prob_pos":        round(r_pos, 4),
+            "rb_prob_neg":        round(r_neg, 4),
+            "rb_prob_neu":        round(r_neu, 4),
             "net_agreement":      round(net, 4),
             "sentiment_reliable": True,
         })
@@ -453,11 +500,11 @@ async def main():
     # 2. BERT
     print("\n[2/7] Computing CryptoBERT + FinBERT embeddings...")
     titles = [m["title"] for m in msgs]
-    cb_emb, fb_emb, cb_probs = batch_bert(titles)
+    cb_emb, fb_emb, cb_probs, fb_probs, rb_probs = batch_bert(titles)
 
     # 3. Features
     print("\n[3/7] Building XGBoost v9 features...")
-    X = build_features(msgs, cb_emb, fb_emb, cb_probs)
+    X = build_features(msgs, cb_emb, fb_emb, cb_probs, fb_probs, rb_probs)
     print(f"  Feature matrix: {X.shape}")
 
     # 4. Score
@@ -477,7 +524,7 @@ async def main():
 
     # 6. Write to training CSV
     print("\n[6/7] Appending to training CSV...")
-    train_rows, col_order = to_training_rows(msgs, cb_probs, btc_map, eth_map)
+    train_rows, col_order = to_training_rows(msgs, cb_probs, fb_probs, rb_probs, btc_map, eth_map)
     if train_rows:
         new_df = pd.DataFrame(train_rows)
         for col in col_order:

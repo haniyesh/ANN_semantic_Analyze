@@ -278,22 +278,56 @@ def build_xgb_features(
     return np.concatenate([cb_embedding, fb_embedding, sent_vec, type_probs, macro, rag]).astype(np.float32)
 
 
+_btc_vol_mom_cache: dict = {"val": (0.0, 0.0), "ts": 0}
+
+
+def _get_live_btc_vol_mom() -> tuple[float, float]:
+    """Compute rolling BTC volatility and momentum from recent 15m candles.
+    Returns (btc_vol, btc_mom) matching training: std(last 20 returns), mean(last 5 returns).
+    Cached for 5 minutes to avoid hammering Binance.
+    """
+    now = time_module.time()
+    if now - _btc_vol_mom_cache["ts"] < 300:
+        return _btc_vol_mom_cache["val"]
+    try:
+        import requests
+        resp = requests.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": "BTCUSDT", "interval": "15m", "limit": 25},
+            timeout=5,
+        )
+        klines = resp.json()
+        closes = [float(k[4]) for k in klines]
+        if len(closes) < 3:
+            return 0.0, 0.0
+        returns = [(closes[i] - closes[i-1]) / closes[i-1] * 100
+                   for i in range(1, len(closes))]
+        vol = float(np.std(returns[-20:])) if len(returns) >= 2 else 0.0
+        mom = float(np.mean(returns[-5:])) if returns else 0.0
+        _btc_vol_mom_cache["val"] = (vol, mom)
+        _btc_vol_mom_cache["ts"] = now
+        return vol, mom
+    except Exception:
+        return _btc_vol_mom_cache["val"]
+
+
 def build_macro_features(pub_dt: datetime) -> np.ndarray:
     """
     Build 8-dim macro feature vector: 5 timing + 3 price context.
     Matches xgboost_v9 training layout: [weekend, low_liq, us_hours, asia_hours, fomc_week,
                                           btc_vol, btc_mom, fear_greed]
-    btc_vol and btc_mom are unavailable for live items → zeroed.
     """
     hour = pub_dt.hour
+    dow  = pub_dt.weekday()
     timing = np.array([
-        0.0,                             # is_weekend       (disabled)
-        0.0,                             # is_low_liquidity (disabled)
+        float(dow >= 5),                 # is_weekend
+        float(2 <= hour <= 6),           # is_low_liquidity
         float(13 <= hour <= 21),         # is_us_hours
         float(0  <= hour <= 8),          # is_asia_hours
-        0.0,                             # fomc_week        (simplified)
+        0.0,                             # fomc_week (TODO: load FOMC calendar)
     ], dtype=np.float32)
-    price_ctx = np.array([0.0, 0.0, _get_live_fear_greed()], dtype=np.float32)
+    btc_vol, btc_mom = _get_live_btc_vol_mom()
+    price_ctx = np.array([btc_vol, btc_mom, _get_live_fear_greed()], dtype=np.float32)
     return np.concatenate([timing, price_ctx])
 
 
@@ -309,8 +343,13 @@ async def save_full_news(
 ) -> int | None:
     """Save news item to database. Returns news_id or None on error."""
     try:
-        return None
-    except Exception:
+        return await save_news(
+            pool, title=title, link=link, source=source,
+            coin=coin, category=category, signal=signal,
+            impact_score=impact_score, published_at=published_at,
+        )
+    except Exception as e:
+        print(f"  DB save_full_news error: {e}")
         return None
 
 
@@ -375,10 +414,14 @@ def should_display_in_all(model_score, model_score_1h, confidence, title=""):
 async def send_to_dashboard(payload: dict):
     """Send signal to dashboard ALL feed."""
     try:
+        headers = {}
+        api_secret = os.getenv("API_SECRET", "")
+        if api_secret:
+            headers["X-Api-Secret"] = api_secret
         async with httpx.AsyncClient() as client:
-            await client.post(f"{DASHBOARD_API}/news", json=payload, timeout=3)
+            await client.post(f"{DASHBOARD_API}/news", json=payload, headers=headers, timeout=3)
     except Exception as e:
-        print(f"  ⚠️  Dashboard API error: {e}")
+        print(f"  Dashboard API error: {e}")
 
 
 async def post_hot_to_telegram(payload: dict):
@@ -456,8 +499,8 @@ async def process_news_item(news: dict):
         return
     news["title"] = title
 
-    # ── Step 1: Sentiment ─────────────────────────────────────────
-    sent, embedding, news_type = score_sentiment(title)
+    # ── Step 1: Sentiment (offloaded to thread to avoid blocking event loop) ──
+    sent, embedding, news_type = await asyncio.to_thread(score_sentiment, title)
 
     # ── Step 1b: Weighted ensemble override ─────────────────────
     # Instead of trusting one model, average all 3 models' probabilities.
@@ -527,18 +570,21 @@ async def process_news_item(news: dict):
     except Exception:
         sent["sentiment_reliable"] = True  # fallback: assume reliable
 
-    # ── Step 1c: FinBERT embedding ────────────────────────────────
-    fb_embedding = np.zeros(768, dtype=np.float32)
-    bundle = _load_model()
-    if bundle and "fb_tok" in bundle:
-        try:
-            inputs = bundle["fb_tok"](
-                title, return_tensors="pt", truncation=True, max_length=128, padding=True
-            )
-            with torch.no_grad():
-                fb_embedding = bundle["fb_mdl"](**inputs).last_hidden_state[:, 0, :].numpy().flatten().astype(np.float32)
-        except Exception:
-            pass
+    # ── Step 1c: FinBERT embedding (offloaded) ─────────────────────
+    def _compute_fb_embedding():
+        fb_emb = np.zeros(768, dtype=np.float32)
+        bundle = _load_model()
+        if bundle and "fb_tok" in bundle:
+            try:
+                inputs = bundle["fb_tok"](
+                    title, return_tensors="pt", truncation=True, max_length=128, padding=True
+                )
+                with torch.no_grad():
+                    fb_emb = bundle["fb_mdl"](**inputs).last_hidden_state[:, 0, :].numpy().flatten().astype(np.float32)
+            except Exception:
+                pass
+        return fb_emb
+    fb_embedding = await asyncio.to_thread(_compute_fb_embedding)
 
     # ── Step 2: Macro + RAG features ─────────────────────────────
     macro        = build_macro_features(pub_dt)
@@ -548,8 +594,8 @@ async def process_news_item(news: dict):
     # ── Step 4: Build flat XGBoost feature vector ─────────────────
     features = build_xgb_features(sent, embedding, fb_embedding, macro, rag_features)
 
-    # ── Step 5: Model inference ───────────────────────────────────
-    model_result   = run_model(features)
+    # ── Step 5: Model inference (offloaded) ────────────────────────
+    model_result   = await asyncio.to_thread(run_model, features)
 
     # XGBoost outputs calibrated probs [0,1] — normalization is identity (min=0, max=1)
     model_score    = _normalize_score(

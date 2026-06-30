@@ -275,8 +275,11 @@ def run_gemini(headlines):
 
 
 def _get_ollama_host() -> str:
-    """Find the Ollama server — tries localhost, then Windows host IP (for WSL)."""
+    """Find the Ollama server — checks OLLAMA_HOST env var, then auto-detects."""
     import urllib.request
+    env_host = os.environ.get("OLLAMA_HOST")
+    if env_host:
+        return env_host if env_host.startswith("http") else f"http://{env_host}"
     for host in ["http://localhost:11434", "http://host.docker.internal:11434"]:
         try:
             urllib.request.urlopen(f"{host}/api/tags", timeout=2)
@@ -299,38 +302,50 @@ def _get_ollama_host() -> str:
 
 def run_ollama(headlines, model="deepseek-r1:7b"):
     print(f"  [12] Ollama / {model} (local, free) …", flush=True)
+    import requests as _req
+    host = _get_ollama_host()
+    # Verify connection and available models
     try:
-        import ollama
-        host = _get_ollama_host()
-        client = ollama.Client(host=host)
-        # Check model is available
-        try:
-            available = [m["name"] for m in client.list()["models"]]
-            if not any(model.split(":")[0] in m for m in available):
-                print(f"       ⚠ Model '{model}' not found. Available: {available}")
-                print(f"         Pull it first: ollama pull {model}")
-                if available:
-                    model = available[0]
-                    print(f"         Using '{model}' instead.")
-                else:
-                    return None
-        except Exception:
-            pass
-        preds = []
-        for h in headlines:
-            try:
-                r = client.chat(model=model, messages=[
-                    {"role": "user", "content": PROMPT_TEMPLATE.format(title=h["title"])}
-                ])
-                raw = _strip_thinking(r["message"]["content"].strip())
-                preds.append(normalize(raw))
-            except Exception as e:
-                print(f"       ⚠ Ollama error on id={h['id']}: {e}")
-                preds.append("neutral")
-        return preds
-    except ImportError:
-        print("       ⚠ ollama not installed — pip install ollama")
+        tags = _req.get(f"{host}/api/tags", timeout=5).json()
+        available = [m["name"] for m in tags.get("models", [])]
+        if not any(model.split(":")[0] in m for m in available):
+            print(f"       ⚠ Model '{model}' not found. Available: {available}")
+            if available:
+                model = available[0]
+                print(f"         Using '{model}' instead.")
+            else:
+                print(f"         Pull one first: ollama pull llama3.2")
+                return None
+    except Exception as e:
+        print(f"       ⚠ Cannot reach Ollama at {host}: {e}")
         return None
+
+    is_thinking = any(x in model for x in ["deepseek-r1", "qwq", "r1"])
+    preds = []
+    for i, h in enumerate(headlines, 1):
+        if i % 20 == 0:
+            print(f"       … {i}/{len(headlines)}", flush=True)
+        messages = [{"role": "user", "content": PROMPT_TEMPLATE.format(title=h["title"])}]
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "options": {"num_predict": 10, "temperature": 0},
+        }
+        # Disable chain-of-thought for thinking models (Ollama 0.5+)
+        if is_thinking:
+            payload["think"] = False
+        try:
+            r = _req.post(f"{host}/api/chat", json=payload, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            content = data.get("message", {}).get("content", "")
+            raw = _strip_thinking(content.strip())
+            preds.append(normalize(raw))
+        except Exception as e:
+            print(f"       ⚠ Ollama error on id={h['id']}: {e}")
+            preds.append("neutral")
+    return preds
 
 
 def run_claude(headlines):
@@ -456,13 +471,19 @@ def main():
     parser.add_argument("--ollama-model", default="deepseek-r1:7b",
                         help="Ollama model name (default: deepseek-r1:7b)")
     parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Test on first N headlines only (useful for quick testing)")
     args = parser.parse_args()
 
     # Override ollama model
     LLM_RUNNERS["ollama"] = (f"Ollama/{args.ollama_model}", lambda h: run_ollama(h, args.ollama_model))
 
     headlines = json.loads(TEST_FILE.read_text())
-    print(f"\nLoaded {len(headlines)} headlines from {TEST_FILE.name}")
+    if args.limit:
+        headlines = headlines[:args.limit]
+        print(f"\nLoaded {len(headlines)} headlines (limited to first {args.limit}) from {TEST_FILE.name}")
+    else:
+        print(f"\nLoaded {len(headlines)} headlines from {TEST_FILE.name}")
 
     results = {}
 

@@ -306,7 +306,10 @@ def build_features(df: pd.DataFrame, train_idx: np.ndarray, skip_rag: bool = Fal
     else:
         from pipeline.rag_news import build_rag_features_qdrant
         ch_rates = df.iloc[train_idx].groupby("channel")["is_impactful_15m"].mean().to_dict()
-        rag, _   = build_rag_features_qdrant(df, channel_impact_rates=ch_rates)
+        rag, _   = build_rag_features_qdrant(
+            df, channel_impact_rates=ch_rates,
+            train_idx=train_idx, rebuild=True,  # train-only index, no leakage
+        )
         print(f"  RAG      : {rag.shape[1]} dims")
 
     X = np.hstack([cb_emb, fb_emb, sent_df, type_probs, macro, rag]).astype(np.float32)
@@ -511,6 +514,65 @@ def print_feature_importance(clf_15m, feat_names: list, top_n: int = 20):
 
 
 # ══════════════════════════════════════════════════════════════════
+# BASELINES
+# ══════════════════════════════════════════════════════════════════
+def evaluate_baselines(y_cls, y_reg, label="15m"):
+    """Evaluate simple baselines for comparison. Returns dict of baseline results."""
+    n = len(y_cls)
+    results = {}
+
+    # 1. Majority class: always predict the majority label
+    majority = int(np.mean(y_cls) >= 0.5)
+    majority_preds = np.full(n, majority, dtype=int)
+    results["majority"] = {
+        "F1":    f1_score(y_cls, majority_preds, zero_division=0),
+        "Prec":  precision_score(y_cls, majority_preds, zero_division=0),
+        "Rec":   recall_score(y_cls, majority_preds, zero_division=0),
+        "Acc":   accuracy_score(y_cls, majority_preds),
+    }
+
+    # 2. Random (matching class distribution)
+    rng = np.random.default_rng(42)
+    p_pos = float(np.mean(y_cls))
+    random_preds = (rng.random(n) < p_pos).astype(int)
+    results["random"] = {
+        "F1":    f1_score(y_cls, random_preds, zero_division=0),
+        "Prec":  precision_score(y_cls, random_preds, zero_division=0),
+        "Rec":   recall_score(y_cls, random_preds, zero_division=0),
+        "Acc":   accuracy_score(y_cls, random_preds),
+    }
+
+    # 3. Always-impactful: predict every headline is impactful
+    all_pos = np.ones(n, dtype=int)
+    results["always_impactful"] = {
+        "F1":    f1_score(y_cls, all_pos, zero_division=0),
+        "Prec":  precision_score(y_cls, all_pos, zero_division=0),
+        "Rec":   recall_score(y_cls, all_pos, zero_division=0),
+        "Acc":   accuracy_score(y_cls, all_pos),
+    }
+
+    # 4. Recent volatility: predict impactful if recent abs returns are high
+    # Use rolling abs(return) > threshold as a proxy
+    abs_returns = np.abs(y_reg)
+    vol_threshold = np.median(abs_returns)  # predict impactful above median volatility
+    vol_preds = (abs_returns > vol_threshold).astype(int)
+    results["volatility_threshold"] = {
+        "F1":    f1_score(y_cls, vol_preds, zero_division=0),
+        "Prec":  precision_score(y_cls, vol_preds, zero_division=0),
+        "Rec":   recall_score(y_cls, vol_preds, zero_division=0),
+        "Acc":   accuracy_score(y_cls, vol_preds),
+    }
+
+    print(f"\n  ── BASELINES ({label}) ──")
+    print(f"  {'Baseline':<25} {'F1':>8} {'Prec':>8} {'Rec':>8} {'Acc':>8}")
+    print(f"  {'─'*60}")
+    for name, m in results.items():
+        print(f"  {name:<25} {m['F1']:8.3f} {m['Prec']:8.3f} {m['Rec']:8.3f} {m['Acc']:8.3f}")
+
+    return results
+
+
+# ══════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════
 def main():
@@ -527,22 +589,25 @@ def main():
 
     df = load_data()
 
-    print(f"\n[3/7] MONTHLY RANDOM SPLIT (seed={MONTHLY_SEED})")
-    df["_ym"]  = df["published"].dt.to_period("M")
-    months     = sorted(df["_ym"].unique())
-    rng        = np.random.default_rng(MONTHLY_SEED)
-    shuffled   = np.array(months, dtype=object)
-    rng.shuffle(shuffled)
-    n_tr  = int(len(months) * 0.70)
-    n_val = int(len(months) * 0.15)
-    train_m = set(shuffled[:n_tr])
-    val_m   = set(shuffled[n_tr:n_tr + n_val])
-    test_m  = set(shuffled[n_tr + n_val:])
-    tri     = np.where(df["_ym"].isin(train_m))[0]
-    vi      = np.where(df["_ym"].isin(val_m))[0]
-    te_idx  = np.where(df["_ym"].isin(test_m))[0]
-    df.drop(columns=["_ym"], inplace=True)
-    print(f"  Train: {len(tri):,} | Val: {len(vi):,} | Test: {len(te_idx):,}")
+    print(f"\n[3/7] CHRONOLOGICAL SPLIT (70/15/15)")
+    # True chronological split: earliest 70% = train, next 15% = val, latest 15% = test.
+    # Data is already sorted by published in load_data().
+    n = len(df)
+    n_tr  = int(n * 0.70)
+    n_val = int(n * 0.15)
+    tri    = np.arange(0, n_tr)
+    vi     = np.arange(n_tr, n_tr + n_val)
+    te_idx = np.arange(n_tr + n_val, n)
+
+    # Sanity check: no temporal leakage
+    train_max = df.iloc[tri]["published"].max()
+    val_min   = df.iloc[vi]["published"].min()
+    test_min  = df.iloc[te_idx]["published"].min()
+    assert train_max <= val_min, f"Train/val overlap: train_max={train_max} > val_min={val_min}"
+    assert val_min <= test_min, f"Val/test overlap"
+    print(f"  Train: {len(tri):,} [{df.iloc[0]['published'].date()} → {train_max.date()}]")
+    print(f"  Val:   {len(vi):,}  [{val_min.date()} → {df.iloc[vi[-1]]['published'].date()}]")
+    print(f"  Test:  {len(te_idx):,}  [{test_min.date()} → {df.iloc[-1]['published'].date()}]")
 
     (X, feat_names,
      y_r15, y_c15, y_r1h, y_c1h, y_dir) = build_features(df, tri, skip_rag=args.skip_rag)
@@ -611,6 +676,19 @@ def main():
     print(f"\n  Saved → {XGB_RESULTS_PATH}")
 
     print_feature_importance(clf_15m, feat_names)
+
+    # Baselines — essential for interpreting XGBoost performance
+    print(f"\n{'='*65}\n  BASELINES (test set)\n{'='*65}")
+    bl_15 = evaluate_baselines(y_c15[te_idx], y_r15[te_idx], "15m")
+    bl_1h = evaluate_baselines(y_c1h[te_idx], y_r1h[te_idx], "1h")
+    xgb_results["baselines_15m"] = bl_15
+    xgb_results["baselines_1h"]  = bl_1h
+    print(f"\n  XGBoost 15m F1={r15['F1']:.3f} vs best baseline F1={max(b['F1'] for b in bl_15.values()):.3f}")
+    print(f"  XGBoost 1h  F1={r1h['F1']:.3f} vs best baseline F1={max(b['F1'] for b in bl_1h.values()):.3f}")
+
+    # Re-save with baselines
+    with open(XGB_RESULTS_PATH, "w") as f:
+        json.dump(xgb_results, f, indent=2, default=str)
 
     if args.compare or ANN_RESULTS_PATH.exists():
         print_comparison(xgb_results)

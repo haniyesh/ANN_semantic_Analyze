@@ -1,13 +1,15 @@
 """
-API server — read-only, JSON cache mode.
+API server — JSON cache mode with authenticated ingestion.
 Loads news_cache.json on startup and serves it.
-No live bot, no ingestion, no broadcasting.
+POST /news requires API_SECRET header for write access.
 """
+import os
 import re
 import sys
 import csv
 import json
 import math
+import time
 import aiohttp
 from pathlib import Path
 from typing import List
@@ -16,11 +18,34 @@ from collections import defaultdict, Counter
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))   # make project root importable
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from config import API_HOST, API_PORT, GROQ_API_KEYS, GROQ_CLASSIFICATION_MODEL
+
+# ── Security config ──────────────────────────────────────────────
+API_SECRET = os.getenv("API_SECRET", "")  # required for POST /news
+ALLOWED_ORIGINS = os.getenv(
+    "CORS_ORIGINS",
+    f"http://localhost:5173,http://localhost:{API_PORT}"
+).split(",")
+
+# ── Rate limiting (simple in-memory) ────────────────────────────
+_rate_limits: dict[str, list] = {}  # ip -> [timestamps]
+RATE_LIMIT_RPM = 60  # requests per minute per IP for expensive endpoints
+
+
+def _check_rate_limit(client_ip: str, rpm: int = RATE_LIMIT_RPM):
+    """Raise 429 if client_ip exceeds rpm requests/minute."""
+    now = time.time()
+    window = now - 60
+    if client_ip not in _rate_limits:
+        _rate_limits[client_ip] = []
+    _rate_limits[client_ip] = [t for t in _rate_limits[client_ip] if t > window]
+    if len(_rate_limits[client_ip]) >= rpm:
+        raise HTTPException(429, "Rate limit exceeded — try again in a minute")
+    _rate_limits[client_ip].append(now)
 
 CACHE_FILE   = ROOT / "news_cache.json"
 HIST_CSV     = ROOT / "news_cleaned_filtered_scored.csv"
@@ -347,8 +372,8 @@ async def lifespan(_app):
 app = FastAPI(title="Crypto News API", version="2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -431,8 +456,13 @@ async def ws_hot(ws: WebSocket):
 
 # ── REST — news ────────────────────────────────────────────────────
 @app.post("/news")
-async def ingest_news(item: dict):
-    """Receive a scored news item from main.py and persist it to the cache."""
+async def ingest_news(item: dict, x_api_secret: str = Header(None)):
+    """Receive a scored news item from main.py and persist it to the cache.
+    Requires X-Api-Secret header matching API_SECRET env var."""
+    if not API_SECRET:
+        raise HTTPException(503, "API_SECRET not configured — POST /news disabled")
+    if x_api_secret != API_SECRET:
+        raise HTTPException(403, "Invalid or missing X-Api-Secret header")
     global all_news, hot_news, _idf_cache
 
     # Normalise channel name
@@ -493,6 +523,33 @@ def get_since(ts: int = 0):
         if float(i.get("published_ts") or i.get("received_at", 0)) > ts
     ]
     return sorted(items, key=lambda x: x.get("published_ts") or 0)
+
+
+@app.get("/fear-greed")
+def get_fear_greed():
+    """Return the latest Fear & Greed index value from cache or live API."""
+    cache_path = ROOT / "fear_greed_cache.json"
+    try:
+        if cache_path.exists():
+            items = json.loads(cache_path.read_text())
+            if items:
+                latest = sorted(items, key=lambda x: int(x.get("timestamp", 0)), reverse=True)[0]
+                value  = int(latest["value"])
+                label  = latest.get("value_classification", "")
+                ts     = int(latest.get("timestamp", 0))
+                return {"value": value, "label": label, "timestamp": ts, "source": "cache"}
+    except Exception:
+        pass
+    # Live fallback
+    try:
+        import urllib.request
+        with urllib.request.urlopen("https://api.alternative.me/fng/?limit=1&format=json", timeout=5) as r:
+            data   = json.loads(r.read())["data"][0]
+            value  = int(data["value"])
+            label  = data["value_classification"]
+            return {"value": value, "label": label, "timestamp": int(data["timestamp"]), "source": "live"}
+    except Exception as e:
+        return {"value": 50, "label": "Neutral", "timestamp": 0, "source": "error", "error": str(e)}
 
 
 @app.get("/health")
@@ -975,7 +1032,9 @@ async def find_similar(item: dict):
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 @app.post("/news/explain")
-async def explain_news(item: dict):
+async def explain_news(request: Request, item: dict):
+    # Rate limit: 10 req/min for this expensive Groq-backed endpoint
+    _check_rate_limit(request.client.host if request.client else "unknown", rpm=10)
     title     = item.get("title", "")
     sentiment = item.get("sentiment", "neutral")
     confidence= item.get("confidence", 50)
@@ -1053,13 +1112,27 @@ Do NOT repeat the numbers — explain the REASONING behind them."""
 
 
 # ── Binance proxy (chart data) ─────────────────────────────────────
+_ALLOWED_SYMBOLS   = {"BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT"}
+_ALLOWED_INTERVALS = {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "1w"}
+
+
+def _validate_binance_params(symbol: str, interval: str):
+    sym = re.sub(r"[^A-Z0-9]", "", symbol.upper())
+    if sym not in _ALLOWED_SYMBOLS:
+        raise HTTPException(400, f"Symbol not allowed. Use one of: {sorted(_ALLOWED_SYMBOLS)}")
+    if interval not in _ALLOWED_INTERVALS:
+        raise HTTPException(400, f"Interval not allowed. Use one of: {sorted(_ALLOWED_INTERVALS)}")
+    return sym, interval
+
+
 @app.get("/proxy/klines")
 async def proxy_klines(symbol: str = "BTCUSDT", interval: str = "1h",
                        limit: int = 200, startTime: int = None):
+    sym, intv = _validate_binance_params(symbol, interval)
     url = (f"https://api.binance.com/api/v3/klines"
-           f"?symbol={symbol}&interval={interval}&limit={min(limit,1000)}")
+           f"?symbol={sym}&interval={intv}&limit={min(limit,1000)}")
     if startTime:
-        url += f"&startTime={startTime}"
+        url += f"&startTime={int(startTime)}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -1070,8 +1143,13 @@ async def proxy_klines(symbol: str = "BTCUSDT", interval: str = "1h",
 
 @app.websocket("/proxy/stream/{symbol}/{interval}")
 async def proxy_stream(ws: WebSocket, symbol: str, interval: str):
+    try:
+        sym, intv = _validate_binance_params(symbol, interval)
+    except HTTPException:
+        await ws.close(code=1008, reason="Invalid symbol or interval")
+        return
     await ws.accept()
-    binance_url = f"wss://stream.binance.com:9443/ws/{symbol.lower()}@kline_{interval}"
+    binance_url = f"wss://stream.binance.com:9443/ws/{sym.lower()}@kline_{intv}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.ws_connect(binance_url) as bws:
@@ -1080,8 +1158,10 @@ async def proxy_stream(ws: WebSocket, symbol: str, interval: str):
                         await ws.send_text(msg.data)
                     elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                         break
-    except Exception:
+    except WebSocketDisconnect:
         pass
+    except Exception as e:
+        print(f"Binance proxy stream error: {e}")
     finally:
         try: await ws.close()
         except: pass

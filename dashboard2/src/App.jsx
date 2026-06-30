@@ -442,7 +442,7 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
     })();
 
     // Live WebSocket via local proxy
-    const ws = new WebSocket(`ws://localhost:8000/proxy/stream/${binSymbol}/${interval}`);
+    const ws = new WebSocket(`${WS_BASE.replace('/api','')}/proxy/stream/${binSymbol}/${interval}`);
     wsRef.current = ws;
     ws.onmessage = (e) => {
       const k = JSON.parse(e.data).k;
@@ -591,102 +591,95 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
   );
 }
 
-function SentimentGauge({ news, symbol = "BTCUSDT" }) {
-  const [momentum, setMomentum] = useState(null); // { change, open, close }
-  const coinLabel = symbol.startsWith("ETH") ? "ETH" : "BTC";
+function FearGreedGauge() {
+  const [data, setData] = useState(null);
 
   useEffect(() => {
-    setMomentum(null);
-    const fetchMomentum = async () => {
+    const fetch_ = async () => {
       try {
-        const res = await fetch(`${API_BASE}/proxy/klines?symbol=${symbol}&interval=15m&limit=2`);
-        const data = await res.json();
-        if (data && data.length >= 2) {
-          const curr  = data[data.length - 1];
-          const open  = parseFloat(curr[1]);
-          const close = parseFloat(curr[4]);
-          const change = ((close - open) / open) * 100;
-          setMomentum({ change, open, close });
-        }
+        const res = await fetch(`${API_BASE}/fear-greed`);
+        const d   = await res.json();
+        setData(d);
       } catch {}
     };
-    fetchMomentum();
-    const iv = setInterval(fetchMomentum, 30_000);
+    fetch_();
+    const iv = setInterval(fetch_, 5 * 60_000); // refresh every 5 min
     return () => clearInterval(iv);
-  }, [symbol]);
+  }, []);
 
-  // Map price change to gauge value: ±3% → 0–100
-  const MAX_CHANGE = 3;
-  const value = momentum != null
-    ? Math.round(Math.min(100, Math.max(0, 50 + (momentum.change / MAX_CHANGE) * 50)))
-    : 50;
-  const ready = momentum != null;
+  const value = data?.value ?? 50;
+  const label = data?.label ?? "Loading…";
+  const ready = data != null;
 
-  const angle    = (value / 100) * 180 - 90;
-  const getColor = (v) => v < 30 ? "#ef4444" : v < 45 ? "#f59e0b" : v < 55 ? "#eab308" : v < 70 ? "#22c55e" : "#16a34a";
-  const getLabel = (v) => v < 20 ? "Extreme Bear" : v < 40 ? "Bearish" : v < 60 ? "Neutral" : v < 80 ? "Bullish" : "Extreme Bull";
-  const color    = ready ? getColor(value) : COLORS.muted;
-  const changeStr = momentum ? `${momentum.change >= 0 ? "+" : ""}${momentum.change.toFixed(2)}%` : "—";
+  const angle = (value / 100) * 180 - 90;
+
+  const getColor = (v) =>
+    v <= 24 ? "#ef4444" : v <= 49 ? "#f97316" : v <= 54 ? "#eab308" : v <= 74 ? "#84cc16" : "#22c55e";
+
+  const color = getColor(value);
+
+  const zones = [
+    { label: "Extreme Fear", range: "0–24",  color: "#ef4444" },
+    { label: "Fear",         range: "25–49", color: "#f97316" },
+    { label: "Greed",        range: "50–74", color: "#84cc16" },
+    { label: "Extreme Greed",range: "75–100",color: "#22c55e" },
+  ];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
       <div style={{ display: "flex", justifyContent: "space-between", width: "100%", alignItems: "center" }}>
-        <span style={{ fontSize: 10, fontWeight: 600, color: COLORS.text }}>{coinLabel} 15m Momentum</span>
-        <span style={{ fontSize: 9, color: ready ? color : COLORS.muted, fontFamily: "monospace", fontWeight: 700 }}>
-          {changeStr}
-        </span>
+        <span style={{ fontSize: 10, fontWeight: 600, color: COLORS.text, letterSpacing: 0.5 }}>Fear & Greed Index</span>
+        <span style={{ fontSize: 9, color: COLORS.muted, fontFamily: "monospace" }}>Daily</span>
       </div>
-      <svg width="160" height="90" viewBox="0 0 160 90">
+
+      <svg width="160" height="92" viewBox="0 0 160 92">
         <defs>
-          <linearGradient id="gaugeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+          <linearGradient id="fgGrad" x1="0%" y1="0%" x2="100%" y2="0%">
             <stop offset="0%"   stopColor="#ef4444" />
-            <stop offset="33%"  stopColor="#f59e0b" />
-            <stop offset="66%"  stopColor="#eab308" />
+            <stop offset="25%"  stopColor="#f97316" />
+            <stop offset="50%"  stopColor="#eab308" />
+            <stop offset="75%"  stopColor="#84cc16" />
             <stop offset="100%" stopColor="#22c55e" />
           </linearGradient>
         </defs>
-        <path d="M 15 80 A 65 65 0 0 1 145 80" fill="none" stroke={COLORS.border2} strokeWidth="12" strokeLinecap="round" />
-        <path d="M 15 80 A 65 65 0 0 1 145 80" fill="none"
-          stroke={ready ? "url(#gaugeGrad)" : COLORS.border2} strokeWidth="12" strokeLinecap="round" />
-        <g transform={`rotate(${angle}, 80, 80)`}>
-          <line x1="80" y1="80" x2="80" y2="22" stroke={color} strokeWidth="2.5" strokeLinecap="round" />
-          <circle cx="80" cy="80" r="5" fill={color} />
+        {/* Track */}
+        <path d="M 15 82 A 65 65 0 0 1 145 82" fill="none" stroke={COLORS.border2} strokeWidth="10" strokeLinecap="round" />
+        {/* Colored arc */}
+        <path d="M 15 82 A 65 65 0 0 1 145 82" fill="none"
+          stroke={ready ? "url(#fgGrad)" : COLORS.border2} strokeWidth="10" strokeLinecap="round" opacity={ready ? 0.85 : 0.3} />
+        {/* Needle */}
+        <g transform={`rotate(${angle}, 80, 82)`}>
+          <line x1="80" y1="82" x2="80" y2="26" stroke={color} strokeWidth="2.5" strokeLinecap="round"
+            style={{ filter: `drop-shadow(0 0 4px ${color}80)` }} />
+          <circle cx="80" cy="82" r="5" fill={color} style={{ filter: `drop-shadow(0 0 6px ${color})` }} />
         </g>
-        <text x="80" y="68" textAnchor="middle" fill={ready ? COLORS.text : COLORS.muted}
-          fontSize="22" fontWeight="700" fontFamily="monospace">{value}</text>
+        {/* Value */}
+        <text x="80" y="70" textAnchor="middle" fill={ready ? color : COLORS.muted}
+          fontSize="24" fontWeight="800" fontFamily="monospace"
+          style={{ filter: ready ? `drop-shadow(0 0 8px ${color}60)` : "none" }}>
+          {ready ? value : "—"}
+        </text>
+        {/* Min / Max labels */}
+        <text x="16" y="92" textAnchor="middle" fill={COLORS.muted} fontSize="8">0</text>
+        <text x="144" y="92" textAnchor="middle" fill={COLORS.muted} fontSize="8">100</text>
       </svg>
-      <span style={{ fontFamily: "monospace", fontSize: 12, color, letterSpacing: 2, textTransform: "uppercase" }}>
-        {getLabel(value)}
+
+      <span style={{
+        fontFamily: "monospace", fontSize: 11, fontWeight: 700,
+        color, letterSpacing: 1, textTransform: "uppercase",
+        textShadow: `0 0 10px ${color}60`,
+      }}>
+        {label}
       </span>
-      {/* Price momentum bar */}
-      <div style={{ width: "100%", marginTop: 4 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-          <span style={{ fontSize: 9, color: COLORS.muted, letterSpacing: 1 }}>BEAR</span>
-          <span style={{ fontSize: 9, color: COLORS.muted, letterSpacing: 1 }}>BULL</span>
-        </div>
-        <div style={{ height: 4, background: COLORS.border2, borderRadius: 2, position: "relative" }}>
-          {/* center line */}
-          <div style={{ position: "absolute", left: "50%", top: 0, width: 1, height: "100%", background: COLORS.border2 }} />
-          {/* fill from center */}
-          {ready && (() => {
-            const pct = Math.min(50, Math.abs(momentum.change) / MAX_CHANGE * 50);
-            const isBull = momentum.change >= 0;
-            return <div style={{
-              position: "absolute",
-              top: 0, height: "100%", borderRadius: 2,
-              left: isBull ? "50%" : `${50 - pct}%`,
-              width: `${pct}%`,
-              background: isBull ? COLORS.green : COLORS.red,
-            }} />;
-          })()}
-        </div>
-        {momentum && (
-          <div style={{ display: "flex", justifyContent: "center", marginTop: 4 }}>
-            <span style={{ fontSize: 9, fontFamily: "monospace", color }}>
-              {momentum.change >= 0 ? "▲" : "▼"} {Math.abs(momentum.change).toFixed(3)}% / 15m candle
-            </span>
+
+      {/* Zone legend */}
+      <div style={{ display: "flex", gap: 4, marginTop: 2, flexWrap: "wrap", justifyContent: "center" }}>
+        {zones.map(z => (
+          <div key={z.label} style={{ display: "flex", alignItems: "center", gap: 3 }}>
+            <div style={{ width: 6, height: 6, borderRadius: "50%", background: z.color, opacity: 0.8 }} />
+            <span style={{ fontSize: 8, color: COLORS.muted }}>{z.range}</span>
           </div>
-        )}
+        ))}
       </div>
     </div>
   );
@@ -2177,7 +2170,7 @@ export default function CryptoDashboard() {
   const [allNews, setAllNews]             = useState([]);
   const [hotSignals, setHotSignals]       = useState([]);
   const [selectedNews, setSelectedNews]   = useState(null);
-  const [newsH, setNewsH]                 = useState(450);
+  const [newsH, setNewsH]                 = useState(280);
   const newsDragRef                        = useRef({ dragging: false, startY: 0, startH: 0 });
 
   // Calendar state
@@ -2405,7 +2398,7 @@ export default function CryptoDashboard() {
           </div>
         </div>
         <div style={{ padding: "14px 12px", borderTop: `1px solid ${COLORS.border}` }}>
-          <SentimentGauge news={allNews} symbol={selectedSymbol} />
+          <FearGreedGauge />
         </div>
       </div>
 
@@ -2518,7 +2511,7 @@ export default function CryptoDashboard() {
 
           {/* ── Dashboard (main) ── */}
           {activeNav === "Dashboard" && (
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", overflowY: "auto" }}>
+            <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
               {/* Chart header — BTC / ETH switcher + interval + clock */}
               <div style={{ padding: "10px 20px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", alignItems: "center", gap: 12, background: "rgba(8,12,20,0.95)", backdropFilter: "blur(12px)", flexShrink: 0, position: "sticky", top: 0, zIndex: 10 }}>
                 <div style={{ display: "flex", gap: 6 }}>
@@ -2559,7 +2552,7 @@ export default function CryptoDashboard() {
               </div>
 
               {/* Single chart — switches between BTC and ETH */}
-              <div style={{ height: 520, flexShrink: 0, borderBottom: `1px solid ${COLORS.border}` }}>
+              <div style={{ flex: 1, minHeight: 0, borderBottom: `1px solid ${COLORS.border}` }}>
                 <BinanceChart symbol={selectedPair} interval={chartInterval}
                   news={allNews.filter(n => {
                     const c = classifyNewsCoin(n.title);
@@ -2607,8 +2600,8 @@ export default function CryptoDashboard() {
                       return true;
                     });
                     return (
-                      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-                        <div style={{ overflowY: "auto", padding: "0 16px" }}>
+                      <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+                        <div style={{ flex: 1, overflowY: "auto", padding: "0 16px" }}>
                           {uniqueNews.length === 0 ? (
                             <div style={{ padding: "20px 0", textAlign: "center", color: COLORS.muted, fontSize: 12 }}>
                               No news today

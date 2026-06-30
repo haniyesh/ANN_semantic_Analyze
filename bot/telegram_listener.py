@@ -60,6 +60,12 @@ async def start(news_queue):
 
     client = TelegramClient(session_name, TELEGRAM_API_ID, TELEGRAM_API_HASH)
 
+    # Track seen links to prevent duplicate queuing (live + backfill overlap)
+    seen_links = set()
+
+    def _make_link(channel: str, msg_id: int) -> str:
+        return f"https://t.me/{channel}/{msg_id}" if channel else ""
+
     @client.on(events.NewMessage(chats=TELEGRAM_CHANNELS))
     async def handler(event):
         try:
@@ -75,13 +81,18 @@ async def start(news_queue):
                 channel = getattr(event.chat, "username", "") or \
                           getattr(event.chat, "title",    "") or "telegram"
 
+            link = _make_link(channel, msg.id)
+            if link in seen_links:
+                return
+            seen_links.add(link)
+
             pub_dt = msg.date
 
             news_queue.append({
                 "title":   title,
                 "text":    text,
                 "source":  channel,
-                "link":    f"https://t.me/{channel}/{msg.id}" if channel else "",
+                "link":    link,
                 "pub_dt":  pub_dt,
             })
             print(f"[TELEGRAM] {channel} | {title[:70]}")
@@ -95,6 +106,7 @@ async def start(news_queue):
     # ── Backfill: fetch last BACKFILL_DAYS days of history ────────
     cutoff = datetime.now(timezone.utc) - timedelta(days=BACKFILL_DAYS)
     total_backfill = 0
+    skipped = 0
     print(f"[TELEGRAM] Backfilling last {BACKFILL_DAYS} days (since {cutoff.date()})...")
     for ch in TELEGRAM_CHANNELS:
         count = 0
@@ -108,12 +120,19 @@ async def start(news_queue):
                 text = (msg.text or "").strip()
                 if not text:
                     continue
+
+                link = _make_link(ch, msg.id)
+                if link in seen_links:
+                    skipped += 1
+                    continue
+                seen_links.add(link)
+
                 title = text.splitlines()[0][:300]
                 news_queue.append({
                     "title":  title,
                     "text":   text,
                     "source": ch,
-                    "link":   f"https://t.me/{ch}/{msg.id}",
+                    "link":   link,
                     "pub_dt": msg_dt,
                 })
                 count += 1
@@ -122,6 +141,6 @@ async def start(news_queue):
         print(f"[TELEGRAM]   {ch}: {count} historical messages queued")
         total_backfill += count
 
-    print(f"[TELEGRAM] Backfill complete — {total_backfill} messages queued")
+    print(f"[TELEGRAM] Backfill complete — {total_backfill} queued, {skipped} duplicates skipped")
     print(f"[TELEGRAM] Listening: {TELEGRAM_CHANNELS}")
     await client.run_until_disconnected()

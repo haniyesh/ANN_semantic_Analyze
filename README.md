@@ -1,6 +1,8 @@
 # Crypto News Sentiment & Market Impact — Live Dashboard
 
-> A real-time system that monitors cryptocurrency news, scores each headline for market impact, and displays the results on a live dashboard with BTC/ETH price charts.
+> A real-time system that monitors cryptocurrency news, scores each headline for market impact, and displays the results on a live dashboard with BTC price charts.
+
+> **Status: Academic demo / research prototype.** See [Known Issues & Limitations](#known-issues--limitations) for important caveats about the reported metrics and scientific claims.
 
 ---
 
@@ -10,7 +12,7 @@ This system listens to crypto news channels in real time, analyzes each headline
 
 **Two layers:**
 1. **Live pipeline** — Telegram listener → sentiment analysis → impact scoring → live dashboard
-2. **Prediction model** — trained to classify whether a news headline will cause a short-term BTC/ETH price movement
+2. **Prediction model** — XGBoost classifier trained to predict whether a BTC headline will cause a ≥0.3% price move within 15 minutes
 
 ---
 
@@ -19,12 +21,11 @@ This system listens to crypto news channels in real time, analyzes each headline
 A React-based dashboard that connects to the backend in real time.
 
 **Features:**
-- Live BTC & ETH candlestick charts with news markers
+- Live BTC candlestick chart with news markers
 - Hover over chart markers to see the headline
 - News cards ranked by predicted market impact
 - Real-time BTC momentum gauge
-- News & Sentiment tab with coin filter
-- Channel analysis and model performance overview
+- Channel analysis overview
 
 **Impact tiers:**
 
@@ -47,13 +48,7 @@ source .venv311/bin/activate      # Windows: .venv311\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` and fill in your credentials:
-```
-TELEGRAM_API_ID=...
-TELEGRAM_API_HASH=...
-TELEGRAM_CHANNELS=channel1,channel2
-BOT_TOKEN=...
-```
+Copy `.env.example` to `.env` and fill in your credentials.
 
 ### 1. Start the API server
 
@@ -64,10 +59,10 @@ uvicorn api.server:app --host 0.0.0.0 --port 8000 --reload
 ### 2. Start the news pipeline
 
 ```bash
-.venv311/bin/python main.py
+python main.py
 ```
 
-Connects to Telegram, backfills the last 5 days of history, then listens for new messages in real time. Each headline is scored and pushed to the dashboard instantly.
+Connects to Telegram, backfills the last 5 days of history, then listens for new messages in real time. Each headline is scored and pushed to the dashboard.
 
 ### 3. Start the dashboard
 
@@ -86,6 +81,7 @@ npm run build      # production build
 ├── main.py                     # Entry point: Telegram → score → API
 ├── config.py                   # Config and thresholds
 ├── requirements.txt
+├── .env.example                # Required environment variables
 │
 ├── api/
 │   └── server.py               # FastAPI backend: REST + WebSocket + Binance proxy
@@ -105,19 +101,17 @@ npm run build      # production build
 │   ├── price_fetcher.py        # Live BTC/ETH price tracking
 │   └── ...                     # Data collection scripts
 │
-├── models/
-│   └── ...                     # Model architecture classes
-│
 ├── storage/
 │   ├── database.py             # Database connection
-│   └── cache.py                # JSON cache fallback
+│   └── cache.py                # In-memory cache with TTL
 │
 ├── training/
-│   ├── xgboost_v9.py           # Train the scoring model (run once)
+│   ├── xgboost_v9.py           # Train the scoring model
+│   ├── xgboost_v10_groq.py     # Experimental: Groq/LLM sentiment variant
 │   └── ...                     # Historical scoring and data prep scripts
 │
 ├── archive/
-│   └── ...                     # Earlier model versions (kept for reference)
+│   └── ...                     # Earlier model versions
 │
 └── dashboard2/
     ├── src/App.jsx             # Full React dashboard
@@ -125,55 +119,60 @@ npm run build      # production build
     └── package.json
 ```
 
-> **Note:** Model files are not committed to the repo. Run `python training/xgboost_v9.py` once to generate them locally.
+> **Note:** Model files and training data are not committed to the repo. The training CSV and embedding caches must be generated locally before training.
 
 ---
 
 ## Model Architecture
 
-### Production Model — XGBoost
+### Production Model — XGBoost v9
 
-The live scoring pipeline uses a gradient-boosted tree ensemble. Each headline is converted into a rich feature vector combining:
+The live scoring pipeline uses a gradient-boosted tree ensemble (XGBoost). Each headline is converted into a 1,578-dimension feature vector:
 
-- **Semantic embeddings** — two frozen language models (crypto-domain + financial domain)
-- **Sentiment ensemble** — three independent NLP models averaged for stability
-- **News-type classification** — detects the category of the headline
-- **Market context** — trading session, fear & greed index
-- **Historical similarity** — retrieves similar past news and their market outcomes
+- **Dual semantic embeddings** (1,536 dims) — CryptoBERT (768) + FinBERT (768)
+- **Sentiment ensemble** (10 dims) — per-model probabilities from CryptoBERT, FinBERT, RoBERTa + net agreement score
+- **News-type classification** (11 dims) — cosine similarity to category prototypes
+- **Macro features** (5 dims) — weekend, low-liquidity hours, US hours, Asia hours, FOMC week
+- **Price context** (3 dims) — rolling BTC volatility, momentum, Fear & Greed Index
+- **RAG features** (13 dims) — historical similar-news retrieval from Qdrant
 
-Two classifiers run in parallel — one for short-term impact, one for longer-term impact.
+Two binary classifiers (15-minute and 1-hour impact) plus one regressor (predicted % change) run in parallel.
 
-### Earlier Model — Neural Network (ANN)
+### Target Definition
 
-An earlier version used a custom 3-tower neural network with cross-attention fusion between the semantic, retrieval, and market context streams. It is preserved in `archive/` for reference.
+Binary label: `abs((price_+15m − price_0) / price_0) > 0.3%` for the 15-minute classifier, `> 0.5%` for the 1-hour classifier. BTC only.
 
----
+### Training
 
-## ANN vs XGBoost — Comparison
-
-| | Neural Network (ANN) | XGBoost |
-|---|---|---|
-| **Architecture** | 3-tower MLP + cross-attention | Gradient-boosted trees |
-| **Text encoding** | Single language model | Two language models combined |
-| **Sentiment** | Single model | Ensemble of three models |
-| **RAG integration** | Cross-attention fusion | Feature vector lookup |
-| **Training** | Focal loss + early stopping | Threshold sweep on validation set |
-| **Inference speed** | Slower | Fast, no GPU needed |
-| **Interpretability** | Low | Medium (feature importance) |
-| **Performance** | Baseline | Better across all metrics |
-| **Status** | Archived | **Production** |
-
-**Why XGBoost replaced the ANN:**
-- Dual language model features capture both crypto-domain and financial signals
-- Three-model sentiment ensemble reduces noise from any single model
-- More robust with limited training data, less prone to overfitting
-- Faster inference with no GPU dependency
+- **Split:** True chronological, 70/15/15 train/val/test (earliest 70% trains, latest 15% tests)
+- **Class imbalance:** Handled via `scale_pos_weight`
+- **Threshold:** Searched on validation set with minimum precision constraint (20%)
+- **Early stopping:** Patience 20 rounds on logloss
+- **Baselines:** Majority-class, random, always-impactful, and volatility-threshold baselines are computed on the test set for comparison
 
 ---
 
-## Dataset
+## Known Issues & Limitations
 
-Over **75,000 crypto news headlines** paired with real BTC/ETH price data, split chronologically into train, validation, and test sets (no lookahead bias).
+1. ~~Split is random~~ **Fixed.** Split is now chronological (v9 and v10).
+
+2. ~~RAG index leakage~~ **Fixed.** Qdrant index now only contains training rows.
+
+3. ~~No baselines~~ **Fixed.** Majority, random, always-impactful, and volatility baselines are printed and saved alongside model results.
+
+4. ~~Train/serve skew~~ **Largely fixed.** Sentiment (all 3 models), price context (live Binance), RAG similarity threshold, and blocking inference offloading have been addressed. Some minor differences may remain.
+
+5. **BTC only.** The model is trained exclusively on Bitcoin data. ETH headlines shown in the dashboard are scored using the BTC model — ETH is not separately modeled. Treat ETH predictions as illustrative only.
+
+6. **0.3% threshold is noisy.** BTC frequently moves >0.3% in 15 minutes due to normal volatility. A significant portion of the "impactful" positive class may be noise rather than news-driven signal.
+
+7. **Kaggle data has synthetic timestamps.** BTC.csv and ETH.csv headlines are assigned noon UTC — their 15m/1h price labels are approximate. Rows are flagged with `timestamp_synthetic=True`.
+
+8. **Latency.** The pipeline processes headlines after they appear on Telegram. Some price moves may complete before scoring finishes.
+
+9. **Training artifacts not committed.** The training CSV, embedding caches, and model files are not in the repo and cannot currently be regenerated from scratch without the original data sources.
+
+10. **Limited test coverage.** Unit tests, integration tests, and leakage guard tests are not yet in place.
 
 ---
 
@@ -187,15 +186,6 @@ Over **75,000 crypto news headlines** paired with real BTC/ETH price data, split
 | Frontend | React, Vite, Lightweight Charts |
 | Data | Telegram (Telethon), Binance API |
 | Vector DB | Qdrant |
-
----
-
-## Limitations
-
-- Trained primarily on Bitcoin news — transferability to other assets is unverified
-- Headlines only; full article body is not used
-- Algorithmic traders react in milliseconds; some initial price moves may conclude before the pipeline scores the news
-- Crypto market dynamics evolve rapidly — periodic retraining is recommended
 
 ---
 

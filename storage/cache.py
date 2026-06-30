@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta,timezone
 
-class NewsCashe:
+class NewsCache:
     def __init__(self):
         self.store={}
         
@@ -19,57 +19,57 @@ class NewsCashe:
         Get a value by key.
         Returns None if not found or expired.
         """
-        if key not in self._store:
+        if key not in self.store:
             return None
 
         if self.is_expired(key):
             self.delete(key)
             return None
 
-        return self._store[key]
+        return self.store[key]
 
     # ==============================
-    # 🗑️ DELETE
+    # DELETE
     # ==============================
     def delete(self, key: str):
         """
         Remove one item from cache.
         """
-        self._store.pop(key, None)
-        self._expiry.pop(key, None)
+        self.store.pop(key, None)
+        self.expiry.pop(key, None)
 
     # ==============================
-    # 🧹 CLEAR
+    # CLEAR
     # ==============================
     def clear(self):
         """
         Wipe everything from cache.
         """
-        self._store.clear()
-        self._expiry.clear()
+        self.store.clear()
+        self.expiry.clear()
 
     # ==============================
-    # ⏰ IS EXPIRED
+    # IS EXPIRED
     # ==============================
     def is_expired(self, key: str) -> bool:
         """
         Check if a key has passed its expiry time.
         """
-        if key not in self._expiry:
+        if key not in self.expiry:
             return True
-        return datetime.now(timezone.utc).timestamp() > self._expiry[key]
+        return datetime.now(timezone.utc).timestamp() > self.expiry[key]
 
     # ==============================
-    # 📊 SIZE
+    # SIZE
     # ==============================
     def size(self) -> int:
         """
         How many items are currently in cache.
         """
-        return len(self._store)
+        return len(self.store)
 
 
 # ==============================
 # 🌍 GLOBAL INSTANCE
 # ==============================
-cache = NewsCashe()
+cache = NewsCache()

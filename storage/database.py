@@ -1,3 +1,4 @@
+import os
 import ssl
 import asyncpg
 from datetime import datetime, timezone
@@ -9,8 +10,11 @@ from config import DATABASE_URL
 # ==============================
 async def create_pool():
     ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
+    # TLS verification enabled — if your DB uses a self-signed cert,
+    # set DB_SSL_VERIFY=false in .env (not recommended for production)
+    if os.getenv("DB_SSL_VERIFY", "true").lower() in ("false", "0", "no"):
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
     pool = await asyncpg.create_pool(
         dsn=DATABASE_URL,
         ssl=ssl_context,

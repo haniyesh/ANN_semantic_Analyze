@@ -1,0 +1,62 @@
+{
+  "headlines": [
+    {
+      "id": 1,
+      "title": "BlackRock Bitcoin ETF sees record $1.2 billion inflows in a single day",
+      "label": "positive",
+      "category": "institutional",
+      "notes": "Record inflows = strong institutional buying"
+    },
+    {
+      "id": 2,
+      "title": "US SEC approves first spot Bitcoin ETF applications",
+      "label": "positive",
+      "category": "regulatory",
+      "notes": "Long-awaited approval = major bullish catalyst"
+    },
+    {
+      "id": 3,
+      "title": "Federal Reserve signals potential rate cut in September amid cooling inflation",
+      "label": "positive",
+      "category": "macro",
+      "notes": "Rate cut = more liquidity = bullish for risk assets"
+    }
+  ],
+  "predictions": {
+    "CryptoBERT": [
+      "positive",
+      "positive",
+      "negative"
+    ],
+    "FinBERT": [
+      "positive",
+      "neutral",
+      "negative"
+    ],
+    "RoBERTa-Twitter": [
+      "positive",
+      "neutral",
+      "neutral"
+    ],
+    "FinBERT-Tone": [
+      "positive",
+      "neutral",
+      "negative"
+    ],
+    "DistilRoBERTa-Finance": [
+      "positive",
+      "neutral",
+      "negative"
+    ],
+    "Ensemble (prod)": [
+      "positive",
+      "positive",
+      "negative"
+    ],
+    "Ollama/deepseek-r1:7b": [
+      "neutral",
+      "neutral",
+      "neutral"
+    ]
+  }
+}
