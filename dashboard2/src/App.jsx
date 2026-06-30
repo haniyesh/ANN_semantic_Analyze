@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { createChart, CandlestickSeries, HistogramSeries, createSeriesMarkers } from "lightweight-charts";
 
 const API_BASE  = "/api";
-const WS_BASE   = `ws://${window.location.host}/api`;
+const WS_BASE   = `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/api`;
 const TZ_OFFSET = -new Date().getTimezoneOffset() * 60; // seconds offset from UTC to local
 const toLocal   = (ms) => ms / 1000 + TZ_OFFSET;        // Binance ms → local unix seconds
 const toLocalDate = (ts) => {                            // unix seconds → local Date object
@@ -442,7 +442,7 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
     })();
 
     // Live WebSocket via local proxy
-    const ws = new WebSocket(`${WS_BASE.replace('/api','')}/proxy/stream/${binSymbol}/${interval}`);
+    const ws = new WebSocket(`${WS_BASE}/proxy/stream/${binSymbol}/${interval}`);
     wsRef.current = ws;
     ws.onmessage = (e) => {
       const k = JSON.parse(e.data).k;

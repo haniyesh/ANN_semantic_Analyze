@@ -1,10 +1,29 @@
 import asyncio
 import re
+from collections import OrderedDict
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from config import BOT_TOKEN, CHANNEL_ID
 
-BACKFILL_DAYS = 5   # fetch this many days of history on startup
+BACKFILL_DAYS = 5      # fetch this many days of history on startup
+_SEEN_MAX     = 20_000  # bound the dedup set so memory stays flat
+
+# Process-lifetime dedup of message links. Shared by the live handler and the
+# backfill so a message is never queued twice (e.g. a live message arriving
+# during backfill, or a restart re-reading the same history).
+_seen_links: "OrderedDict[str, None]" = OrderedDict()
+
+
+def _mark_seen(link: str) -> bool:
+    """Return True if this link is new (and record it); False if already seen."""
+    if not link:
+        return True  # no stable id — let it through, can't dedup
+    if link in _seen_links:
+        return False
+    _seen_links[link] = None
+    if len(_seen_links) > _SEEN_MAX:
+        _seen_links.popitem(last=False)  # evict oldest
+    return True
 
 
 def clean_url(url: str) -> str:
@@ -87,6 +106,10 @@ async def start(news_queue):
             seen_links.add(link)
 
             pub_dt = msg.date
+            link   = f"https://t.me/{channel}/{msg.id}" if channel else ""
+
+            if not _mark_seen(link):
+                return  # already queued/processed this message
 
             news_queue.append({
                 "title":   title,
@@ -128,6 +151,9 @@ async def start(news_queue):
                 seen_links.add(link)
 
                 title = text.splitlines()[0][:300]
+                link  = f"https://t.me/{ch}/{msg.id}"
+                if not _mark_seen(link):
+                    continue
                 news_queue.append({
                     "title":  title,
                     "text":   text,

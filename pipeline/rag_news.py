@@ -246,9 +246,18 @@ def _build_macro_now_from_ts(timestamp: int) -> dict:
 # ══════════════════════════════════════════════════════════════════
 # COLLECTION SETUP
 # ══════════════════════════════════════════════════════════════════
-def setup_collection(client: QdrantClient) -> bool:
-    """Creates collection if missing. Returns True if already existed."""
+def setup_collection(client: QdrantClient, recreate: bool = False) -> bool:
+    """Creates collection if missing. Returns True if already existed.
+
+    If ``recreate`` is True, any existing collection is dropped first. This is
+    required when rebuilding a TRAIN-ONLY index over a collection that may
+    still hold leaky (val/test) vectors from a previous run.
+    """
     existing = [c.name for c in client.get_collections().collections]
+    if recreate and COLLECTION_NAME in existing:
+        print(f"  Dropping existing '{COLLECTION_NAME}' to rebuild train-only index")
+        client.delete_collection(COLLECTION_NAME)
+        existing = [c.name for c in client.get_collections().collections]
     if COLLECTION_NAME in existing:
         count = client.get_collection(COLLECTION_NAME).points_count
         print(f"  Qdrant '{COLLECTION_NAME}' exists — {count:,} vectors")
@@ -485,15 +494,24 @@ def build_rag_features_qdrant(
     channel_impact_rates: dict,
     top_k: int = TOP_K,
     rebuild: bool = False,
-    train_idx: np.ndarray = None,
+    train_idx: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[dict]]:
     """
     Builds 10-dim macro-reweighted RAG feature array for every row in df.
     Uses 5 macro features: is_weekend, is_low_liquidity, is_us_hours,
     is_asia_hours, fomc_week (from compute_macro.py or computed on-the-fly).
 
-    IMPORTANT: Only training rows are indexed in Qdrant to prevent data leakage.
-    If train_idx is provided, only those rows are uploaded to the vector index.
+    LEAKAGE GUARD: only rows in ``train_idx`` are uploaded into the Qdrant
+    index. This means val/test rows can never be *retrieved* as "similar past
+    news", so their realized outcomes (btc_change/is_impactful payloads) can
+    never bleed into another row's features. The previous version indexed the
+    entire dataframe (train+val+test), which leaked future labels across the
+    split and inflated every metric. The ``lt=timestamp`` filter alone is NOT
+    sufficient: a test row earlier in time than a train row would still be a
+    valid retrieval. ``train_idx`` is the actual fix.
+
+    If ``train_idx`` is None we fall back to the old (leaky) behaviour but emit
+    a loud warning — callers should always pass it.
 
     Time-safe: row i only retrieves news with timestamp < row i's timestamp.
     Parallel: 16 threads, ~20-30 min for 14k rows.
@@ -508,16 +526,21 @@ def build_rag_features_qdrant(
 
     client = get_client()
 
-    already_exists = setup_collection(client)
-    existing_ids   = get_existing_ids(client) if already_exists else set()
-
-    # Only index training rows to prevent label leakage from val/test
-    if train_idx is not None:
-        train_df = df.iloc[train_idx].copy()
-        print(f"  RAG: indexing {len(train_df):,} TRAIN-ONLY rows (leak prevention)")
-        upload_vectors(train_df, client, existing_ids)
+    if train_idx is None:
+        print("  ⚠️  build_rag_features_qdrant called WITHOUT train_idx — "
+              "index will contain ALL rows (LEAKY). Pass train_idx to fix.")
+        upload_df = df
     else:
-        upload_vectors(df, client, existing_ids)
+        upload_df = df.iloc[train_idx]
+        print(f"  Leakage guard: indexing only {len(upload_df):,} TRAIN rows "
+              f"(of {len(df):,} total) — val/test excluded from retrieval")
+
+    # When we have a train_idx and are rebuilding, recreate the collection so
+    # no stale val/test vectors survive from a previous (leaky) build.
+    recreate       = (train_idx is not None) and rebuild
+    already_exists = setup_collection(client, recreate=recreate)
+    existing_ids   = get_existing_ids(client) if already_exists else set()
+    upload_vectors(upload_df, client, existing_ids)
 
     n          = len(df)
     def _safe_ts(val):

@@ -9,10 +9,15 @@ from config import DATABASE_URL
 # 🔌 DATABASE CONNECTION
 # ==============================
 async def create_pool():
+    # Verify TLS by default. Disabling certificate verification exposes the
+    # connection to MITM, so it is opt-in via DB_SSL_INSECURE=1 (only for
+    # local/dev databases with self-signed certs). For production, point
+    # DB_SSL_CA at the provider's CA bundle instead.
     ssl_context = ssl.create_default_context()
-    # TLS verification enabled — if your DB uses a self-signed cert,
-    # set DB_SSL_VERIFY=false in .env (not recommended for production)
-    if os.getenv("DB_SSL_VERIFY", "true").lower() in ("false", "0", "no"):
+    ca_file = os.getenv("DB_SSL_CA")
+    if ca_file and os.path.exists(ca_file):
+        ssl_context.load_verify_locations(cafile=ca_file)
+    if os.getenv("DB_SSL_INSECURE", "0") == "1":
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
     pool = await asyncpg.create_pool(
