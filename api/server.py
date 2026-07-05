@@ -158,13 +158,40 @@ from pipeline.reduce_noise import BLOCKED_CHANNELS, passes_news_filter as _passe
 def _passes_noise_filter(item: dict) -> bool:
     return _passes_news_filter(item.get("title", ""), item.get("channel", ""))
 
-# Impact thresholds — badges only, NOT used for display filtering
-# Display filter uses confidence only (≥50%). Score is for hot/medium coloring.
-# Uses max(model_score, model_score_1h) for tier assignment.
-SCORE_HOT    = 0.50   # Hot    tier: max(s15,s1h) ≥0.50
-SCORE_MED    = 0.25   # Medium tier: max(s15,s1h) ≥0.25
+# Impact / gate thresholds — kept in sync with config.py and dashboard/App.tsx.
+# Applied to max(model_score, model_score_1h). Confidence is in 0–100 units.
+SCORE_HOT    = 0.80   # Hot    tier: max(s15,s1h) ≥0.80  → alert
+SCORE_MED    = 0.55   # Medium tier: max(s15,s1h) ≥0.55
+SCORE_SHOW   = 0.30   # Show   tier: minimum score to display in feed
 SCORE_HIGH   = SCORE_HOT   # alias used in hot_news / explain endpoint
-CONF_MIN     = 50.0   # minimum confidence to display at all
+CONF_MIN     = 50.0   # minimum confidence to display at all (0–100 units)
+
+
+def _max_score(item: dict) -> float:
+    """max(|model_score|, |model_score_1h|) — the value all gates use."""
+    return max(abs(float(item.get("model_score", 0) or 0)),
+               abs(float(item.get("model_score_1h", 0) or 0)))
+
+
+def _recompute_impact(item: dict) -> str:
+    """Impact badge computed live from scores so it always matches config thresholds.
+    Cache vocabulary: High | Medium | Low."""
+    s = _max_score(item)
+    if s >= SCORE_HOT:
+        return "High"
+    if s >= SCORE_MED:
+        return "Medium"
+    return "Low"
+
+
+def _passes_display(item: dict) -> bool:
+    """Show-tier gate: score >= SCORE_SHOW AND confidence >= CONF_MIN (0–100 units)."""
+    return _max_score(item) >= SCORE_SHOW and float(item.get("confidence", 0) or 0) >= CONF_MIN
+
+
+def _gate_feed(items: list) -> list:
+    """Apply the display gate and refresh the impact badge for a list of news items."""
+    return [{**i, "impact": _recompute_impact(i)} for i in items if _passes_display(i)]
 
 # ── News Importance — imported from config ──
 try:
@@ -210,7 +237,7 @@ def _load_cache() -> List[dict]:
 
 all_news: List[dict] = _load_cache()
 
-# Hot = max(score_15m, score_1h) >= 0.50
+# Hot = max(score_15m, score_1h) >= SCORE_HOT (0.80)
 hot_news: List[dict] = [
     item for item in all_news
     if max(abs(float(item.get("model_score", 0))),
@@ -657,10 +684,10 @@ async def ingest_news(item: IngestNewsItem, x_api_key: str = Header(default=""))
 @app.get("/news/since")
 def get_since(ts: int = 0):
     """Return items with published_ts > ts — for incremental frontend polling."""
-    items = [
+    items = _gate_feed([
         i for i in (all_news + historical_news)
         if float(i.get("published_ts") or i.get("received_at", 0)) > ts
-    ]
+    ])
     return sorted(items, key=lambda x: x.get("published_ts") or 0)
 
 
@@ -711,12 +738,12 @@ def get_all(response: Response, limit: int = 500, offset: int = 0):
     Use ?limit=N&offset=M for cursor-style pagination. Clients should
     request only what they render — avoid limit > 2000.
     """
-    combined = sorted(
+    combined = _gate_feed(sorted(
         all_news + historical_news,
         key=lambda x: x.get("published_ts") or x.get("received_at") or 0,
         reverse=True,
-    )
-    limit = max(1, min(limit, 2000))
+    ))
+    limit = max(1, min(limit, 5000))
     page  = combined[offset: offset + limit]
     response.headers["Cache-Control"] = "public, max-age=30"
     response.headers["X-Total-Count"]  = str(len(combined))
@@ -725,7 +752,7 @@ def get_all(response: Response, limit: int = 500, offset: int = 0):
 
 @app.get("/news/hot")
 def get_hot():
-    return hot_news[-50:]
+    return [{**i, "impact": _recompute_impact(i)} for i in hot_news[-50:]]
 
 
 @app.get("/news/dates")
@@ -742,10 +769,10 @@ def get_dates():
 
 @app.get("/news/by-date")
 def get_by_date(start: int, end: int):
-    return [
+    return _gate_feed([
         item for item in all_news + historical_dates_index
         if start <= float(item.get("published_ts") or item.get("received_at", 0)) <= end
-    ]
+    ])
 
 
 # ── REST — training analytics ──────────────────────────────────────

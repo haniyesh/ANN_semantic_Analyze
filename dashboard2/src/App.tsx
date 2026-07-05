@@ -81,10 +81,10 @@ function sentimentLabel(s) {
   return "Neutral";
 }
 // Impact badges (coloring only — NOT used for display filtering)
-// Hot ≥0.50, Medium ≥0.25, uses max(score_15m, score_1h)
-const SCORE_HOT  = 0.50;
-const SCORE_MED  = 0.25;
-const CONF_MIN   = 50;   // minimum confidence to display at all
+// Hot ≥0.80, Medium ≥0.55, Show ≥0.30 — must match config.py + api/server.py
+const SCORE_HOT  = 0.80;
+const SCORE_MED  = 0.55;
+const CONF_MIN   = 50;   // minimum confidence to display at all (0–100 units)
 
 function scoreTier(score15, conf, score1h) {
   const s = Math.max(Math.abs(score15 || 0), Math.abs(score1h || 0));
@@ -2194,7 +2194,7 @@ export default function CryptoDashboard() {
 
   // Load history on mount
   useEffect(() => {
-    fetch(`${API_BASE}/news/all`)
+    fetch(`${API_BASE}/news/all?limit=5000`)
       .then(r => r.json()).then(data => setAllNews(sortByTime(data.map(clientNormalize).filter(passesFilter)))).catch(() => {});
     fetch(`${API_BASE}/news/hot`)
       .then(r => r.json()).then(data => setHotSignals(sortByTime(data.map(clientNormalize)))).catch(() => {});

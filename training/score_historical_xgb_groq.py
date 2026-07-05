@@ -209,7 +209,7 @@ def to_cache_items(df: pd.DataFrame, p15: np.ndarray, p1h: np.ndarray,
         sig_type  = "BUY" if sentiment == "positive" else ("SELL" if sentiment == "negative" else "NEUTRAL")
 
         score = max(prob15, prob1h)
-        impact = "High" if score >= 0.50 else ("Medium" if score >= 0.25 else "Low")
+        impact = "High" if score >= 0.80 else ("Medium" if score >= 0.55 else "Low")  # gates synced with config.SCORE_THRESHOLD_HOT/MEDIUM
 
         items.append({
             "id":              f"hist_{pub_ts}_{hash(str(row.get('title',''))[:30]) % 100000}",

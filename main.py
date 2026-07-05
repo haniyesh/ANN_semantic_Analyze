@@ -11,10 +11,10 @@ Flow:
        crypto-specific types             → CryptoBERT
      CryptoBERT embedding is shared — no duplicate forward pass.
   3. Run through XGBoost v9 model (DualBERT + PriceContext, 1578 features)
-  4. Route — display filter uses confidence only, score is for impact badges:
-     - Display gate: confidence >= 50% (no score gate)
-     - Medium badge: max(score_15m, score_1h) >= 0.25
-     - Hot badge:    max(score_15m, score_1h) >= 0.50
+  4. Route — importance-tiered gate on score AND confidence (see config.py):
+     - Display gate (Show): max(score_15m, score_1h) >= 0.30 AND confidence >= 0.62
+     - Medium badge:        max(score_15m, score_1h) >= 0.55 AND confidence >= 0.70
+     - Hot badge / alert:   max(score_15m, score_1h) >= 0.80 AND confidence >= 0.78
 """
 
 import asyncio
@@ -83,7 +83,7 @@ def _normalize_score(raw: float, min_val: float, max_val: float) -> float:
 
 # ── DISPLAY THRESHOLDS ───────────────────────────────────────────────
 # All thresholds imported from config.py (single source of truth)
-# Tiers: Show (≥0.20/50%) | Medium (≥0.30/55%) | Hot (≥0.55/60%) | Hidden (<0.20)
+# Tiers (score/confidence): Show (≥0.30/0.62) | Medium (≥0.55/0.70) | Hot (≥0.80/0.78) | Hidden (below Show)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -403,7 +403,8 @@ def query_rag(title: str, published_ts: int, channel: str) -> tuple[np.ndarray, 
 # ══════════════════════════════════════════════════════════════════
 def is_hot(model_score: float, model_score_1h: float,
            confidence: float, age_minutes: float) -> bool:
-    """Hot tier: max(score_15m, score_1h) >= 0.50 AND confidence >= 50% AND age < 30min."""
+    """Hot tier: max(score_15m, score_1h) >= HOT_MIN_MODEL_SCORE AND
+    confidence >= HOT_MIN_CONFIDENCE AND age < HOT_MAX_AGE_MIN."""
     return (
         max(abs(model_score), abs(model_score_1h)) >= HOT_MIN_MODEL_SCORE and
         confidence       >= HOT_MIN_CONFIDENCE   and
@@ -412,10 +413,14 @@ def is_hot(model_score: float, model_score_1h: float,
 
 
 def should_display_in_all(model_score, model_score_1h, confidence, title=""):
-    """Display gate: confidence >= 50% AND title >= 20 chars (no score gate)."""
+    """Display gate: score >= IMPORTANT_MIN_SCORE AND confidence >= IMPORTANT_MIN_CONFIDENCE
+    AND title >= 20 chars."""
     if len(title.strip()) < 20:
         return False
-    return confidence >= IMPORTANT_MIN_CONFIDENCE
+    return (
+        max(abs(model_score), abs(model_score_1h)) >= IMPORTANT_MIN_SCORE and
+        confidence >= IMPORTANT_MIN_CONFIDENCE
+    )
 
 
 # ══════════════════════════════════════════════════════════════════

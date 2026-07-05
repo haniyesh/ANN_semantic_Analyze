@@ -27,42 +27,63 @@ GROQ_API_KEYS       = [k.strip() for k in os.getenv("GROQ_API_KEYS", os.getenv("
 GROQ_CLASSIFICATION_MODEL = os.getenv("GROQ_CLASSIFICATION_MODEL", "llama-3.1-8b-instant")
 HF_API_KEY          = os.getenv("HF_API_KEY")
 
-# ── News scoring thresholds — 4-tier system ───────────────────────────────────
-# Tier    | Score  | Confidence | ~% of data
-# Hot     | ≥0.55  | ≥60%       | ~0.4%
-# Medium  | ≥0.30  | ≥55%       | ~1.5%
-# Show    | ≥0.20  | ≥50%       | ~5%
-# Hidden  | <0.20  | —          | ~95%  (never sent to dashboard)
+# ── News scoring thresholds — importance-tiered, calibrated to model output ───
+# Recalibrated 2026-07 against storage/news_cache.json (3,501 items). The gate is
+# on SCORE = max(model_score_15m, model_score_1h) AND a CONFIDENCE floor.
+#
+# Why the old values were wrong: `confidence` is the max of a 3-class softmax, so
+# its natural floor is ~0.33 and ~95% of items already exceed 0.50 — the old 0.50
+# confidence gate filtered almost nothing. And a 0.50 score gate tagged ~19% of
+# all news "Hot" (the alert tier), vs the ~0.4% originally intended. The values
+# below come from the measured score/confidence percentiles so each tier maps to
+# the share of news its importance warrants.
+#
+# Tier    | Score (max 15m/1h) | Confidence | ~% of cache | Action
+# Hot     | ≥ 0.80             | ≥ 0.78     | ~1–2%       | Telegram alert (high conviction)
+# Medium  | ≥ 0.55             | ≥ 0.70     | ~12–15%     | Highlighted badge
+# Show    | ≥ 0.30             | ≥ 0.62     | ~20–25%     | Shown in dashboard feed
+# Hidden  | below Show gate                              | rest        | not displayed
 DASHBOARD_API        = os.getenv("DASHBOARD_API", "http://localhost:8000")
 SCORE_15M_MIN        = 0.0
 SCORE_15M_MAX        = 1.0
 SCORE_1H_MIN         = 0.0
 SCORE_1H_MAX         = 1.0
 
-# Impact badge thresholds — uses max(score_15m, score_1h), NOT for display filtering
-SCORE_THRESHOLD_HOT    = 0.50   # Hot badge
-SCORE_THRESHOLD_MEDIUM = 0.25   # Medium badge
-SCORE_THRESHOLD_SHOW   = 0.0    # No score gate for display (confidence-only)
+# Impact badge / gate thresholds — applied to max(score_15m, score_1h)
+SCORE_THRESHOLD_HOT    = 0.80   # Hot badge / alert
+SCORE_THRESHOLD_MEDIUM = 0.55   # Medium badge
+SCORE_THRESHOLD_SHOW   = 0.30   # minimum score to display in feed
 SCORE_THRESHOLD_HIGH   = SCORE_THRESHOLD_HOT   # alias for legacy code
 
-# Display filter uses confidence only — no score gate
-CONF_MIN    = 0.50   # 50% — minimum confidence to display
-CONF_HOT    = CONF_MIN   # kept for backward compat, no separate hot confidence
-CONF_MEDIUM = CONF_MIN
-CONF_SHOW   = CONF_MIN
+# Confidence floors — one per tier, scaled by news importance
+CONF_SHOW   = 0.62   # display floor
+CONF_MEDIUM = 0.70   # medium tier
+CONF_HOT    = 0.78   # hot tier / alert
+CONF_MIN    = CONF_SHOW   # legacy alias = display floor
 
-# "Show" tier — minimum to display in dashboard feed (confidence only, no score gate)
-IMPORTANT_MIN_SCORE      = 0.0    # no score gate
-IMPORTANT_MIN_CONFIDENCE = CONF_MIN
-IMPORTANT_MIN_SCORE_1H   = 0.0
+# "Show" tier — minimum to display in dashboard feed (score AND confidence gate)
+IMPORTANT_MIN_SCORE      = SCORE_THRESHOLD_SHOW
+IMPORTANT_MIN_CONFIDENCE = CONF_SHOW
+IMPORTANT_MIN_SCORE_1H   = SCORE_THRESHOLD_SHOW
 
 # "Hot" tier — triggers Telegram alert (uses max of both scores)
 HOT_MIN_MODEL_SCORE      = SCORE_THRESHOLD_HOT
-HOT_MIN_CONFIDENCE       = CONF_MIN
+HOT_MIN_CONFIDENCE       = CONF_HOT
 HOT_MIN_MODEL_SCORE_1H   = SCORE_THRESHOLD_HOT   # 1h also checked via max()
 HOT_MIN_SCORE_1H         = SCORE_THRESHOLD_HOT
 HOT_MAX_AGE_MIN          = 30
 BATCH_SIZE           = 3
+
+
+def impact_tier(score_15m, score_1h) -> str:
+    """Canonical impact badge from max(score_15m, score_1h) — single source of truth.
+    Returns one of: 'Hot' | 'Medium' | 'Show' | 'Low'."""
+    s = max(abs(float(score_15m or 0)), abs(float(score_1h or 0)))
+    if s >= SCORE_THRESHOLD_HOT:
+        return "Hot"
+    if s >= SCORE_THRESHOLD_MEDIUM:
+        return "Medium"
+    return "Show" if s >= SCORE_THRESHOLD_SHOW else "Low"
 
 # ── News Importance (editorial importance — independent of price impact) ──
 import re as _re
