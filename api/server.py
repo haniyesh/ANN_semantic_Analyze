@@ -185,8 +185,8 @@ def _recompute_impact(item: dict) -> str:
 
 
 def _passes_display(item: dict) -> bool:
-    """Show-tier gate: score >= SCORE_SHOW AND confidence >= CONF_MIN (0–100 units)."""
-    return _max_score(item) >= SCORE_SHOW and float(item.get("confidence", 0) or 0) >= CONF_MIN
+    """Display gate: confidence >= CONF_MIN. Score gate uses SCORE_SHOW for feed."""
+    return float(item.get("confidence", 0) or 0) >= CONF_MIN and _max_score(item) >= SCORE_SHOW
 
 
 def _gate_feed(items: list) -> list:
@@ -398,7 +398,6 @@ def _compute_full_stats() -> dict:
 
                 btc_price = float(row["btc_price_at_news"])
                 btc_15m   = float(row["btc_price_15m"])
-                btc_1h    = float(row["btc_price_1h"])
                 btc_c15m  = (btc_15m - btc_price) / btc_price * 100
                 impact_score = min(1.0, 0.52 + abs(btc_c15m) / 6.0)
                 conf     = float(row.get("confidence") or 0.5)

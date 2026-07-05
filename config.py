@@ -41,7 +41,7 @@ HF_API_KEY          = os.getenv("HF_API_KEY")
 # Tier    | Score (max 15m/1h) | Confidence | ~% of cache | Action
 # Hot     | ≥ 0.80             | ≥ 0.78     | ~1–2%       | Telegram alert (high conviction)
 # Medium  | ≥ 0.55             | ≥ 0.70     | ~12–15%     | Highlighted badge
-# Show    | ≥ 0.30             | ≥ 0.62     | ~20–25%     | Shown in dashboard feed
+# Show    | ≥ 0.30             | ≥ 0.50     | ~20–25%     | Shown in dashboard feed
 # Hidden  | below Show gate                              | rest        | not displayed
 DASHBOARD_API        = os.getenv("DASHBOARD_API", "http://localhost:8000")
 SCORE_15M_MIN        = 0.0
@@ -56,9 +56,9 @@ SCORE_THRESHOLD_SHOW   = 0.30   # minimum score to display in feed
 SCORE_THRESHOLD_HIGH   = SCORE_THRESHOLD_HOT   # alias for legacy code
 
 # Confidence floors — one per tier, scaled by news importance
-CONF_SHOW   = 0.62   # display floor
-CONF_MEDIUM = 0.70   # medium tier
-CONF_HOT    = 0.78   # hot tier / alert
+CONF_SHOW   = 0.50   # display floor (matches server CONF_MIN=50 and dashboard CONF_MIN=50)
+CONF_MEDIUM = 0.70   # medium tier confidence (Telegram bot only)
+CONF_HOT    = 0.78   # hot tier / alert (Telegram bot only)
 CONF_MIN    = CONF_SHOW   # legacy alias = display floor
 
 # "Show" tier — minimum to display in dashboard feed (score AND confidence gate)

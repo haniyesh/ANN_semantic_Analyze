@@ -26,9 +26,10 @@ import pandas as pd
 warnings.filterwarnings("ignore")
 
 HERE = Path(__file__).parent
-sys.path.insert(0, str(HERE))
+ROOT_TRAIN = HERE.parent
+sys.path.insert(0, str(ROOT_TRAIN))
 
-from xgboost_train_bert import (
+from training.xgboost_train_bert import (
     compute_cryptobert_embeddings,
     compute_finbert_embeddings,
     build_macro_features,
@@ -44,7 +45,7 @@ import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
 
 ROOT       = HERE.parent
-CSV_PATH   = ROOT / "news_cleaned_filtered_scored_pre_ensemble.csv"
+CSV_PATH   = ROOT / "news_cleaned_filtered_scored.csv"
 CACHE_FILE = ROOT / "storage" / "news_cache.json"
 
 from pipeline.reduce_noise import (
@@ -52,7 +53,7 @@ from pipeline.reduce_noise import (
     CRYPTO_FILTERED_CHANNELS, passes_news_filter,
 )
 
-MONTHS_WINDOW = 21   # cover all google_news (Oct 2024 → Jun 2026)
+MONTHS_WINDOW = 3   # last 3 months
 
 CLF15_PATH   = str(ROOT / "xgb_impact_clf_15m_bert.json")
 CLF1H_PATH   = str(ROOT / "xgb_impact_clf_1h_bert.json")
@@ -203,7 +204,7 @@ def to_cache_items(df: pd.DataFrame, p15: np.ndarray, p1h: np.ndarray,
         sentiment = str(row.get("sentiment", "neutral") or "neutral")
         sig_type  = "BUY" if sentiment == "positive" else "SELL" if sentiment == "negative" else "NEUTRAL"
 
-        impact = "High" if max(prob15, prob1h) >= 0.50 else ("Medium" if max(prob15, prob1h) >= 0.25 else "Low")
+        impact = "High" if max(prob15, prob1h) >= 0.80 else ("Medium" if max(prob15, prob1h) >= 0.55 else "Low")  # gates synced with config.SCORE_THRESHOLD_HOT/MEDIUM
 
         items.append({
             "id":              f"hist_{pub_ts}_{hash(str(row.get('title', ''))[:30]) % 100000}",
@@ -231,7 +232,7 @@ def to_cache_items(df: pd.DataFrame, p15: np.ndarray, p1h: np.ndarray,
             "direction":       int(float(row.get("btc_change_15m") or 0) > 0),
             "impact":          impact,
             "news_type":       str(row.get("news_type", "")),
-            "source":          "historical_xgb_v9",
+            "source":          "historical_xgb_bert",
         })
     return items
 
@@ -244,7 +245,8 @@ def load_live_cache() -> list:
         data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
         items = data if isinstance(data, list) else data.get("news", [])
         # Keep only live items (not any historical scored run or old live_xgb sources)
-        HIST_SOURCES = {"historical_v6", "historical_v8", "historical_xgb_v9"}
+        HIST_SOURCES = {"historical_v6", "historical_v8", "historical_xgb_v9",
+                        "historical_xgb_v10", "historical_xgb_groq", "historical_xgb_bert"}
         return [x for x in items if x.get("source") not in HIST_SOURCES]
     except Exception:
         return []

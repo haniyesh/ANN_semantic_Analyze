@@ -157,7 +157,11 @@ function passesFilter(n) {
     && n.sentiment !== "neutral"
     && (n.title || "").trim().length >= 20;
 }
-function passesChartFilter(n) { return passesFilter(n); }
+const SCORE_SHOW = 0.30;  // chart marker threshold — below Medium, above noise
+function passesChartFilter(n) {
+  const s = Math.max(Math.abs(n.model_score || 0), Math.abs(n.model_score_1h || 0));
+  return passesFilter(n) && s >= SCORE_SHOW;
+}
 function channelLogo(channel = "") {
   const c = channel.toLowerCase();
   if (c.includes("coinmarketcap")) return "📊";

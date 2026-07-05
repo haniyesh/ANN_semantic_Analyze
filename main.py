@@ -12,7 +12,7 @@ Flow:
      CryptoBERT embedding is shared — no duplicate forward pass.
   3. Run through XGBoost v9 model (DualBERT + PriceContext, 1578 features)
   4. Route — importance-tiered gate on score AND confidence (see config.py):
-     - Display gate (Show): max(score_15m, score_1h) >= 0.30 AND confidence >= 0.62
+     - Display gate (Show): max(score_15m, score_1h) >= 0.30 AND confidence >= 0.50
      - Medium badge:        max(score_15m, score_1h) >= 0.55 AND confidence >= 0.70
      - Hot badge / alert:   max(score_15m, score_1h) >= 0.80 AND confidence >= 0.78
 """
