@@ -554,19 +554,19 @@ async def _cache_refresh_loop():
             new_items = _load_cache()
             existing_ids = {i.get("id") for i in all_news}
             fresh = [i for i in new_items if i.get("id") not in existing_ids]
-            if fresh:
-                all_news = new_items
-                hot_news = [i for i in all_news
-                            if max(abs(float(i.get("model_score", 0))),
-                                   abs(float(i.get("model_score_1h", 0)))) >= SCORE_HOT]
-                _idf_cache = None
-                _last_cache_mtime = mtime
-                _log.info("Cache refreshed: %d items, %d new", len(all_news), len(fresh))
-                for item in fresh:
-                    await _broadcast(_ws_all_clients, item)
-                    if max(abs(float(item.get("model_score", 0))),
-                           abs(float(item.get("model_score_1h", 0)))) >= SCORE_HOT:
-                        await _broadcast(_ws_hot_clients, item)
+            # Always reload when file changed — rescoring produces same IDs with updated scores
+            all_news = new_items
+            hot_news = [i for i in all_news
+                        if max(abs(float(i.get("model_score", 0))),
+                               abs(float(i.get("model_score_1h", 0)))) >= SCORE_HOT]
+            _idf_cache = None
+            _last_cache_mtime = mtime
+            _log.info("Cache refreshed: %d items (%d new IDs)", len(all_news), len(fresh))
+            for item in fresh:
+                await _broadcast(_ws_all_clients, item)
+                if max(abs(float(item.get("model_score", 0))),
+                       abs(float(item.get("model_score_1h", 0)))) >= SCORE_HOT:
+                    await _broadcast(_ws_hot_clients, item)
         except Exception as exc:
             _log.error("Cache refresh error: %s", exc)
 
