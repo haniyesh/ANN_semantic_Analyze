@@ -10,7 +10,7 @@ Flow:
        market_analysis                   → RoBERTa
        crypto-specific types             → CryptoBERT
      CryptoBERT embedding is shared — no duplicate forward pass.
-  3. Run through XGBoost v9 model (DualBERT + PriceContext, 1578 features)
+  3. Run through XGBoost BERT model (DualBERT + PriceContext, 1569 features)
   4. Route — importance-tiered gate on score AND confidence (see config.py):
      - Display gate (Show): max(score_15m, score_1h) >= 0.30 AND confidence >= 0.50
      - Medium badge:        max(score_15m, score_1h) >= 0.55 AND confidence >= 0.70
@@ -208,7 +208,7 @@ def _load_model():
 
 
 def run_model(features: np.ndarray) -> dict:
-    """Run XGBoost v9 on a single 1578-dim feature vector. Returns score + prediction."""
+    """Run XGBoost BERT on a single 1569-dim feature vector. Returns score + prediction."""
     bundle = _load_model()
     if not bundle:
         return {"model_score": 0.0, "model_score_1h": 0.0, "pred_15m": 0, "pred_1h": 0,
@@ -256,11 +256,11 @@ def build_xgb_features(
     cb_embedding: np.ndarray,
     fb_embedding: np.ndarray,
     macro: np.ndarray,
-    rag: np.ndarray,
 ) -> np.ndarray:
     """
-    Build 1578-dim flat feature vector matching xgboost_train_bert training layout:
-      CryptoBERT(768) | FinBERT(768) | sentiment(13) | type_probs(11) | macro(8) | RAG(10)
+    Build 1569-dim flat feature vector matching xgboost_train_bert training layout:
+      CryptoBERT(768) | FinBERT(768) | sentiment(13) | type_probs(11) | macro(8) | RAG(1, zeros)
+    RAG is always zeros — model trained in skip-RAG mode (np.zeros((n, 1))).
     """
     try:
         from training.xgboost_train_bert import crypto_news_type_classify
@@ -278,6 +278,7 @@ def build_xgb_features(
         sent.get("confidence", 0),
     ], dtype=np.float32)
 
+    rag = np.zeros(1, dtype=np.float32)
     return np.concatenate([cb_embedding, fb_embedding, sent_vec, type_probs, macro, rag]).astype(np.float32)
 
 
@@ -584,7 +585,7 @@ async def process_news_item(news: dict):
     )
 
     # ── Step 4: Build flat XGBoost feature vector ─────────────────
-    features = build_xgb_features(sent, embedding, fb_embedding, macro, rag_features)
+    features = build_xgb_features(sent, embedding, fb_embedding, macro)
 
     # ── Step 5: Model inference (offloaded) ────────────────────────
     model_result   = await asyncio.to_thread(run_model, features)
