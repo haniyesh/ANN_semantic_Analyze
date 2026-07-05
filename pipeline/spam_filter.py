@@ -77,9 +77,10 @@ EXTRA_SPAM_PATTERNS = [
     r"paid partnership",
     r"press release",
 
-    # Generic filler
+    # Generic filler — do NOT add ^breaking: here; "BREAKING: SEC approves ETF"
+    # is the best signal and is boosted by config.news_importance.
+    # Pure price-only alerts are already caught by NOISE_TITLE_RE in reduce_noise.py.
     r"^crypto news:",
-    r"^breaking:",
     r"top \d+ crypto",
     r"\+ more news$",
 ]

@@ -14,7 +14,7 @@ import pandas as pd
 
 
 def chronological_split(n, tr=0.70, vl=0.15):
-    """Mirror of the split logic in training/xgboost_v9.py."""
+    """Mirror of the split logic in training/xgboost_train_bert.py."""
     n_tr = int(n * tr)
     n_val = int(n * vl)
     return (

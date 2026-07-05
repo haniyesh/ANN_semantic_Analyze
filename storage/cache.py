@@ -1,3 +1,9 @@
+"""
+In-memory TTL cache used by the test suite (tests/test_cache.py).
+
+The live pipeline writes directly to storage/news_cache.json via server.py;
+it does not use this class. Do not import NewsCache from production code.
+"""
 from datetime import datetime, timezone
 
 
@@ -47,8 +53,5 @@ class NewsCache:
         """How many items are currently in cache."""
         return len(self.store)
 
-
-# Backwards-compatible alias (old typo'd class name).
-NewsCashe = NewsCache
 
 cache = NewsCache()

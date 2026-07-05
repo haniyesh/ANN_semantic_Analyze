@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+
+    /* Migration mode: loose settings so the renamed .tsx compiles.
+       Tighten ONE at a time once the app builds:
+       1. "strictNullChecks": true
+       2. "noImplicitAny": true
+       3. "strict": true  (replaces the two above)                    */
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": true,
+    "allowJs": true
+  },
+  "include": ["src"]
+}

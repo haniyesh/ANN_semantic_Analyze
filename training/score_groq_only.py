@@ -135,7 +135,7 @@ def main():
 
     if not GROQ_CACHE.exists():
         print("  ✗ groq_sentiment_cache.json not found")
-        print("    Run: python training/xgboost_v10_groq.py --groq-limit 2000")
+        print("    Run: python training/xgboost_train_groq.py --groq-limit 2000")
         sys.exit(1)
 
     with open(GROQ_CACHE) as f:

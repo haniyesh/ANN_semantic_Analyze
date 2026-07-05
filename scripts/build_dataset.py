@@ -11,8 +11,8 @@ Pipeline:
        => news_cleaned_filtered.csv
     -> services/sentiment_score.py     (3-model ensemble sentiment columns)
        => news_cleaned_filtered_scored.csv
-    -> training/xgboost_v9.py          (embeddings, RAG, train, evaluate)
-       => xgboost_v9_clf15m.json, _clf1h.json, _scaler.pkl, results.json
+    -> training/xgboost_train_bert.py   (embeddings, RAG, train, evaluate)
+       => xgb_impact_clf_15m_bert.json, xgb_impact_clf_1h_bert.json, xgb_feature_scaler_bert.pkl, xgb_bert_results.json
 
 Required raw inputs (NOT committed — download from Kaggle into repo root):
   - bitcoin_sentiments_21_24.csv
@@ -119,7 +119,7 @@ def main() -> None:
     env = dict(os.environ)
     if args.keep_unreliable_ts:
         env["KEEP_UNRELIABLE_TS"] = "1"
-    train_cmd = [py, "training/xgboost_v9.py"]
+    train_cmd = [py, "training/xgboost_train_bert.py"]
     if args.skip_rag:
         train_cmd.append("--skip-rag")
     print(f"\n[3/3] training")

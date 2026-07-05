@@ -1,10 +1,10 @@
 """
 score_historical_xgb.py
 ========================
-Score news_cleaned_filtered_scored.csv using XGBoost v9 models
+Score news_cleaned_filtered_scored.csv using XGBoost BERT models
 and write results to news_cache.json (live items preserved).
 
-Features mirror xgboost_v9.py exactly:
+Features mirror xgboost_train_bert.py exactly:
   - Dual BERT embeddings (CryptoBERT + FinBERT, 1536 dims)
   - Ensemble 3-BERT sentiment (13 cols)
   - News-type probs (11 dims)
@@ -28,7 +28,7 @@ warnings.filterwarnings("ignore")
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-from xgboost_v9 import (
+from xgboost_train_bert import (
     compute_cryptobert_embeddings,
     compute_finbert_embeddings,
     build_macro_features,
@@ -36,7 +36,6 @@ from xgboost_v9 import (
     crypto_news_type_classify,
     NEWS_TYPE_LABELS,
     DUAL_EMB_DIM,
-    XGB_MODEL_BASE,
     THRESHOLD_15M, THRESHOLD_1H,
     MONTHLY_SEED,
 )
@@ -44,8 +43,9 @@ from xgboost_v9 import (
 import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
 
-CSV_PATH   = HERE / "news_cleaned_filtered_scored_pre_ensemble.csv"
-CACHE_FILE = HERE / "news_cache.json"
+ROOT       = HERE.parent
+CSV_PATH   = ROOT / "news_cleaned_filtered_scored_pre_ensemble.csv"
+CACHE_FILE = ROOT / "storage" / "news_cache.json"
 
 from pipeline.reduce_noise import (
     BLOCKED_CHANNELS, NOISE_TITLE_RE, CRYPTO_KW_RE,
@@ -54,13 +54,13 @@ from pipeline.reduce_noise import (
 
 MONTHS_WINDOW = 21   # cover all google_news (Oct 2024 → Jun 2026)
 
-CLF15_PATH   = str(XGB_MODEL_BASE) + "_clf15m.json"
-CLF1H_PATH   = str(XGB_MODEL_BASE) + "_clf1h.json"
-SCALER_PATH  = str(XGB_MODEL_BASE) + "_scaler.pkl"
-RESULTS_PATH = HERE / "xgboost_v9_results.json"
+CLF15_PATH   = str(ROOT / "xgb_impact_clf_15m_bert.json")
+CLF1H_PATH   = str(ROOT / "xgb_impact_clf_1h_bert.json")
+SCALER_PATH  = str(ROOT / "xgb_feature_scaler_bert.pkl")
+RESULTS_PATH = ROOT / "xgb_bert_results.json"
 
 
-# ── 1. Load CSV (same filters as xgboost_v9.load_data) ───────────
+# ── 1. Load CSV (same filters as xgboost_train_bert.load_data) ───────────
 def load_data() -> pd.DataFrame:
     df = pd.read_csv(CSV_PATH, low_memory=False)
     for col in df.columns:
@@ -97,7 +97,7 @@ def load_data() -> pd.DataFrame:
     return df
 
 
-# ── 2. Build feature matrix (matches xgboost_v9.build_features) ──
+# ── 2. Build feature matrix (matches xgboost_train_bert.build_features) ──
 def build_features(df: pd.DataFrame) -> tuple[np.ndarray, list, int]:
     cb_emb = compute_cryptobert_embeddings(df)
     fb_emb = compute_finbert_embeddings(df)
@@ -308,7 +308,7 @@ def main():
             "live_items":   len(live_items),
             "hist_items":   len(hist_items),
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "model":        "xgboost_v9",
+            "model":        "xgboost_bert",
         },
         "news": merged,
     }

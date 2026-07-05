@@ -1,9 +1,9 @@
 import asyncio
 import re
+import sys
 from collections import OrderedDict
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
-from config import BOT_TOKEN, CHANNEL_ID
 
 BACKFILL_DAYS = 5      # fetch this many days of history on startup
 _SEEN_MAX     = 20_000  # bound the dedup set so memory stays flat
@@ -77,10 +77,14 @@ async def start(news_queue):
     from pathlib import Path
     session_name = str(Path(__file__).resolve().parent.parent / "telegram_session")
 
-    client = TelegramClient(session_name, TELEGRAM_API_ID, TELEGRAM_API_HASH)
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "[TELEGRAM] Not running in a TTY — client.start() would hang waiting "
+            "for an interactive login code. Run once interactively to create the "
+            "session file, then restart under systemd/Docker."
+        )
 
-    # Track seen links to prevent duplicate queuing (live + backfill overlap)
-    seen_links = set()
+    client = TelegramClient(session_name, TELEGRAM_API_ID, TELEGRAM_API_HASH)
 
     def _make_link(channel: str, msg_id: int) -> str:
         return f"https://t.me/{channel}/{msg_id}" if channel else ""
@@ -101,12 +105,7 @@ async def start(news_queue):
                           getattr(event.chat, "title",    "") or "telegram"
 
             link = _make_link(channel, msg.id)
-            if link in seen_links:
-                return
-            seen_links.add(link)
-
             pub_dt = msg.date
-            link   = f"https://t.me/{channel}/{msg.id}" if channel else ""
 
             if not _mark_seen(link):
                 return  # already queued/processed this message
@@ -145,15 +144,11 @@ async def start(news_queue):
                     continue
 
                 link = _make_link(ch, msg.id)
-                if link in seen_links:
+                if not _mark_seen(link):
                     skipped += 1
                     continue
-                seen_links.add(link)
 
                 title = text.splitlines()[0][:300]
-                link  = f"https://t.me/{ch}/{msg.id}"
-                if not _mark_seen(link):
-                    continue
                 news_queue.append({
                     "title":  title,
                     "text":   text,

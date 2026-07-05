@@ -1,0 +1,27 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+
+[tool.ruff.lint]
+# E/W: pycodestyle  F: pyflakes  I: isort  UP: pyupgrade
+# Ignoring a few rules that conflict with the existing style:
+#   E501 line-too-long (handled by formatter when we add one)
+#   E402 module-level import not at top (needed for sys.path hacks in scripts)
+#   F401 imported-but-unused (some modules re-export for convenience)
+select = ["E", "W", "F", "I", "UP"]
+ignore = ["E501", "E402", "F401", "F841", "W291", "W293"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test files can use assert and have some star-imports
+"tests/*"  = ["F811", "F821"]
+# Training scripts often have exploratory unused vars
+"training/*" = ["F841", "E741"]
+"services/fetch_telegram_2026.py" = ["E741"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "slow: marks tests as slow (ML model loads, network calls)",
+    "requires_models: tests that need torch / HuggingFace models on disk",
+]

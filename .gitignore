@@ -16,19 +16,12 @@ dashboard/node_modules/
 # Data files (large / generated)
 *.csv
 *.json.bak
-news_cache.json
+storage/news_cache.json
 fear_greed_cache.json
 
-# XGBoost binary model files
-xgboost_v9_clf15m.json
-xgboost_v9_clf1h.json
-xgboost_v9_reg15m.json
-xgboost_cls15.json
-xgboost_cls1h.json
-xgboost_dir.json
-xgboost_model_clf15m.json
-xgboost_model_clf1h.json
-xgboost_model_reg15m.json
+# XGBoost binary model files (large artifacts — share via release/Drive)
+xgb_impact_clf_*.json
+xgb_price_reg_*.json
 
 # Telegram session files (sensitive credentials)
 *.session
@@ -44,6 +37,9 @@ telegram_session.session
 # Dashboard build output
 dashboard2/dist/
 
-# Corrupted / temp files
-xgboost_results.json
-xgboost_v9_results.json
+# Groq sentiment cache (large, regenerable via build_groq_csv.py)
+groq_sentiment_cache.json
+
+# Results JSONs are intentionally tracked — main.py and the API read
+# thresholds and metrics from them at startup.
+# xgb_bert_results.json, xgb_groq_results.json, ann_*_results.json → committed

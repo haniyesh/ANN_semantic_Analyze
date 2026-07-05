@@ -1,0 +1,94 @@
+version: "3.9"
+
+# ── Crypto News Analyzer — full stack ─────────────────────────────────────────
+#
+# Usage:
+#   cp .env.example .env          # fill in secrets
+#   docker compose up -d          # start all services
+#   docker compose logs -f api    # follow API logs
+#   docker compose down -v        # tear down + remove volumes
+#
+# Services:
+#   postgres   — PostgreSQL 16, data persisted in a named volume
+#   api        — FastAPI server (port 8000), serves dashboard + WebSocket
+#   bot        — Telegram listener + scoring pipeline
+#   dashboard  — Vite/React frontend (port 5173, dev mode)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-cryptonews}
+      POSTGRES_USER:     ${POSTGRES_USER:-cryptouser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DB_URL: postgresql://${POSTGRES_USER:-cryptouser}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cryptonews}
+      LOG_FILE: /app/logs/api.log
+    volumes:
+      - ./storage:/app/storage          # news_cache.json lives here
+      - ./logs:/app/logs
+      - model_cache:/app/model_cache    # HuggingFace model weights
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+  bot:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DB_URL: postgresql://${POSTGRES_USER:-cryptouser}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cryptonews}
+      LOG_FILE: /app/logs/bot.log
+    volumes:
+      - ./storage:/app/storage
+      - ./logs:/app/logs
+      - model_cache:/app/model_cache
+      # Telegram session file must persist across restarts
+      - telegram_session:/app/telegram_session
+    command: python main.py
+
+  dashboard:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./dashboard2:/app
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:8000
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    profiles:
+      - dev   # only started with: docker compose --profile dev up
+
+volumes:
+  pgdata:
+  model_cache:
+  telegram_session:

@@ -21,7 +21,7 @@ def _load_module(relpath: str, name: str):
 
 
 def test_training_quarantines_unreliable_timestamps():
-    """Mirror the filter in xgboost_v9.load_data()."""
+    """Mirror the filter in xgboost_train_bert.load_data()."""
     df = pd.DataFrame({
         "timestamp_reliable": [True, False, True, False],
         "v": [1, 2, 3, 4],

@@ -1,7 +1,7 @@
 """
 API server — JSON cache mode with authenticated ingestion.
 Loads news_cache.json on startup and serves it.
-POST /news requires API_SECRET header for write access.
+POST /news requires X-API-Key header matching INGEST_API_KEY env var.
 """
 import os
 import re
@@ -10,6 +10,7 @@ import csv
 import json
 import math
 import time
+import secrets
 import aiohttp
 from pathlib import Path
 from typing import List
@@ -18,46 +19,138 @@ from collections import defaultdict, Counter
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))   # make project root importable
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 import uvicorn
 
-from config import API_HOST, API_PORT, GROQ_API_KEYS, GROQ_CLASSIFICATION_MODEL
+
+# ── Request models (Pydantic) ─────────────────────────────────────
+class IngestNewsItem(BaseModel):
+    """Validated payload from the bot's ingest pipeline (POST /news)."""
+    model_config = ConfigDict(extra="allow")   # forward all fields to cache
+    title: str
+    channel: str = ""
+    id: str | None = None
+    model_score: float | None = None
+    model_score_1h: float | None = None
+    published_ts: int | None = None
+    type: str = "NEUTRAL"
+    confidence: float = 50.0
+    sentiment: str = "neutral"
+
+    @field_validator("title")
+    @classmethod
+    def title_not_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("title must not be empty")
+        return v
+
+
+class AnalyzeRequest(BaseModel):
+    """Body for POST /analyze/custom."""
+    title: str = Field(..., min_length=5, max_length=500,
+                       description="News headline to score")
+
+
+class SimilarRequest(BaseModel):
+    """Body for POST /news/similar."""
+    model_config = ConfigDict(extra="allow")
+    title: str
+    similar: list = []
+
+
+class ExplainRequest(BaseModel):
+    """Body for POST /news/explain."""
+    model_config = ConfigDict(extra="allow")
+    title: str = ""
+    sentiment: str = "neutral"
+    confidence: float = 50.0
+    model_score: float = 0.0
+    model_score_1h: float = 0.0
+    btc_change_15m: float = 0.0
+    btc_change_1h: float = 0.0
+    channel: str = "unknown"
+    similar: list = []
+
+from config import API_HOST, API_PORT, GROQ_API_KEYS, GROQ_CLASSIFICATION_MODEL, validate_api
+from log import setup_logging, get_logger
+
+setup_logging(log_file=os.getenv("LOG_FILE"))
+_log = get_logger("api.server")
+validate_api()
 
 # ── Security config ──────────────────────────────────────────────
-API_SECRET = os.getenv("API_SECRET", "")  # required for POST /news
-ALLOWED_ORIGINS = os.getenv(
-    "CORS_ORIGINS",
-    f"http://localhost:5173,http://localhost:{API_PORT}"
-).split(",")
+# INGEST_API_KEY guards POST /news. Read by _INGEST_API_KEY below (near the endpoint).
+# CORS origins are read by _allowed_origins near the middleware registration below.
 
 # ── Rate limiting (simple in-memory) ────────────────────────────
 _rate_limits: dict[str, list] = {}  # ip -> [timestamps]
 RATE_LIMIT_RPM = 60  # requests per minute per IP for expensive endpoints
 
 
+def _news_id(channel: str, title: str, published_ts: int) -> str:
+    """Deterministic, collision-resistant news ID stable across restarts.
+
+    Uses the first 16 hex chars of SHA-1 over channel|title|published_ts.
+    SHA-1 is fine here — this is a content-address, not a security hash.
+    Avoids: Python hash() salt (different every restart), published_ts*1000
+    collisions (two headlines in the same second share an ID).
+    """
+    import hashlib
+    raw = f"{channel}|{title}|{published_ts}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:16]
+
+
+# Only honor X-Forwarded-For when running behind a trusted reverse proxy that
+# strips/overwrites the header. Set BEHIND_PROXY=1 in .env for such deployments.
+# Without it, any client can spoof X-Forwarded-For to bypass per-IP rate limiting.
+_BEHIND_PROXY = os.getenv("BEHIND_PROXY", "").lower() in ("1", "true", "yes")
+
+
+def _client_ip(request: Request) -> str:
+    """Return the real client IP.
+
+    Reads X-Forwarded-For only when BEHIND_PROXY=1, preventing spoofing on
+    deployments that don't strip the header at the proxy layer.
+    """
+    if _BEHIND_PROXY:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
 def _check_rate_limit(client_ip: str, rpm: int = RATE_LIMIT_RPM):
     """Raise 429 if client_ip exceeds rpm requests/minute."""
     now = time.time()
     window = now - 60
-    if client_ip not in _rate_limits:
-        _rate_limits[client_ip] = []
-    _rate_limits[client_ip] = [t for t in _rate_limits[client_ip] if t > window]
-    if len(_rate_limits[client_ip]) >= rpm:
+    timestamps = [t for t in _rate_limits.get(client_ip, []) if t > window]
+    if len(timestamps) >= rpm:
         raise HTTPException(429, "Rate limit exceeded — try again in a minute")
-    _rate_limits[client_ip].append(now)
+    timestamps.append(now)
+    _rate_limits[client_ip] = timestamps
 
-CACHE_FILE   = ROOT / "news_cache.json"
+CACHE_FILE   = ROOT / "storage" / "news_cache.json"
 HIST_CSV     = ROOT / "news_cleaned_filtered_scored.csv"
 
-# Normalize legacy channel name variants to canonical names
-_CHANNEL_NORM = {
+# Canonical channel name map — None means "blocked, drop the item".
+# Single source of truth; applied via _normalize_channel() below.
+_CHANNEL_NORM: dict[str, str | None] = {
     "CoinTelegraph":   "cointelegraph",
-    "CoinMarketCap":   None,   # blocked
+    "CoinMarketCap":   None,
     "CryptoNews":      None,
     "CoingraphNews":   None,
     "cryptoslatenews": None,
 }
+
+
+def _normalize_channel(ch: str) -> str | None:
+    """Return canonical channel name, or None if the channel is blocked."""
+    if ch not in _CHANNEL_NORM:
+        return ch
+    return _CHANNEL_NORM[ch]   # None → blocked
 
 from pipeline.reduce_noise import BLOCKED_CHANNELS, passes_news_filter as _passes_news_filter
 
@@ -93,13 +186,8 @@ def _load_cache() -> List[dict]:
             else:
                 return []
             for i in items:
-                ch = i.get("channel", "")
-                if ch in _CHANNEL_NORM:
-                    normalized = _CHANNEL_NORM[ch]
-                    if normalized is None:
-                        i["channel"] = "__blocked__"
-                    else:
-                        i["channel"] = normalized
+                norm = _normalize_channel(i.get("channel", ""))
+                i["channel"] = norm if norm is not None else "__blocked__"
             items = [i for i in items if i.get("channel") not in BLOCKED_CHANNELS and i.get("channel") != "__blocked__"]
             items = [i for i in items if _passes_noise_filter(i)]
             # Add published_ts if missing
@@ -116,8 +204,8 @@ def _load_cache() -> List[dict]:
                         except Exception:
                             pass
             return items
-        except Exception:
-            pass
+        except Exception as _e:
+            _log.error("Failed to load %s: %s — dashboard will be empty until cache refreshes", CACHE_FILE, _e)
     return []
 
 all_news: List[dict] = _load_cache()
@@ -129,7 +217,7 @@ hot_news: List[dict] = [
            abs(float(item.get("model_score_1h", 0)))) >= SCORE_HOT
 ]
 
-print(f"✅ Loaded {len(all_news)} news items from cache  ({len(hot_news)} hot)")
+_log.info("Loaded %d news items from cache  (%d hot)", len(all_news), len(hot_news))
 
 
 # ── Load historical CSV (last 6 months) ───────────────────────────
@@ -143,13 +231,10 @@ def _load_csv_as_news(months: int | None = None) -> List[dict]:
     with open(HIST_CSV, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             try:
-                ch = row.get("channel", "")
-                # Normalize legacy channel name variants
-                if ch in _CHANNEL_NORM:
-                    normalized = _CHANNEL_NORM[ch]
-                    if normalized is None:
-                        continue   # blocked channel
-                    row["channel"] = normalized
+                ch = _normalize_channel(row.get("channel", ""))
+                if ch is None:
+                    continue   # blocked channel
+                row["channel"] = ch
                 if row.get("channel") in BLOCKED_CHANNELS:
                     continue
                 if not _passes_noise_filter(row):
@@ -168,41 +253,48 @@ def _load_csv_as_news(months: int | None = None) -> List[dict]:
                 btc_c15m  = (btc_15m - btc_price) / btc_price * 100
                 btc_c1h   = (btc_1h  - btc_price) / btc_price * 100
 
-                confidence = float(row.get("confidence") or 50)
+                confidence = float(row.get("confidence") or 0.5)
+                if confidence <= 1.0:   # CSV stores 0-1; dashboard expects 0-100
+                    confidence *= 100
                 sentiment  = row.get("sentiment", "neutral")
-
-                # Score based on actual BTC impact, floored so all items pass the
-                # frontend >= 0.50 filter while still reflecting real market reaction.
-                impact_score = min(1.0, 0.52 + abs(btc_c15m) / 6.0)
                 sig_type = (
                     "BUY"  if sentiment == "positive" else
                     "SELL" if sentiment == "negative" else
                     "NEUTRAL"
                 )
 
+                # realized_impact = |btc_change| normalized to 0–1.
+                # This is NOT a model prediction — it is the actual price outcome
+                # observed after the fact. Never expose it as model_score.
+                r15 = round(min(1.0, abs(btc_c15m) / 3.0), 4)
+                r1h = round(min(1.0, abs(btc_c1h)  / 3.0), 4)
+
                 items.append({
-                    "id":             f"hist_{pub_ts}_{hash(row.get('title', '')[:30]) % 100000}",
-                    "title":          row.get("title", ""),
-                    "link":           row.get("link", ""),
-                    "channel":        row.get("channel", "unknown"),
-                    "published":      published,
-                    "published_ts":   pub_ts,
-                    "sentiment":      sentiment,
-                    "sentiment_score": float(row.get("sentiment_score") or 0),
-                    "confidence":     confidence,
-                    "weight":         float(row.get("weight") or 0),
-                    "prob_positive":  float(row.get("prob_positive") or 0),
-                    "prob_negative":  float(row.get("prob_negative") or 0),
-                    "prob_neutral":   float(row.get("prob_neutral") or 0),
-                    "type":           sig_type,
-                    "btc_change_15m": round(btc_c15m, 4),
-                    "btc_change_1h":  round(btc_c1h,  4),
-                    "model_score":    round(impact_score, 4),
-                    "model_score_1h": round(min(1.0, 0.52 + abs(btc_c1h) / 6.0), 4),
+                    "id":               _news_id(row.get("channel", "unknown"), row.get("title", ""), pub_ts),
+                    "title":            row.get("title", ""),
+                    "link":             row.get("link", ""),
+                    "channel":          row.get("channel", "unknown"),
+                    "published":        published,
+                    "published_ts":     pub_ts,
+                    "sentiment":        sentiment,
+                    "sentiment_score":  float(row.get("sentiment_score") or 0),
+                    "confidence":       confidence,
+                    "weight":           float(row.get("weight") or 0),
+                    "prob_positive":    float(row.get("prob_positive") or 0),
+                    "prob_negative":    float(row.get("prob_negative") or 0),
+                    "prob_neutral":     float(row.get("prob_neutral") or 0),
+                    "type":             sig_type,
+                    "btc_change_15m":   round(btc_c15m, 4),
+                    "btc_change_1h":    round(btc_c1h,  4),
+                    "model_score":      None,   # no model prediction for historical rows
+                    "model_score_1h":   None,
+                    "realized_impact":  r15,    # actual 15m outcome, not a prediction
+                    "realized_impact_1h": r1h,
+                    "is_realized":      True,
                     "score_normalized": True,
-                    "impact":         "high" if abs(btc_c15m) >= 0.5 else "medium" if abs(btc_c15m) >= 0.3 else "low",
-                    "news_type":      row.get("news_type", ""),
-                    "source":         "historical",
+                    "impact":           "high" if abs(btc_c15m) >= 0.5 else "medium" if abs(btc_c15m) >= 0.3 else "low",
+                    "news_type":        row.get("news_type", ""),
+                    "source":           "historical",
                 })
             except (ValueError, TypeError, KeyError):
                 continue
@@ -218,24 +310,28 @@ def _load_csv_as_news(months: int | None = None) -> List[dict]:
     return sorted(items, key=lambda x: x["published_ts"])
 
 
-# Recent historical (6 months) — used for /news/all feed
-historical_news: List[dict] = _load_csv_as_news(months=6)
+# Parse CSV once — derive both views without a second parse.
+_all_hist: List[dict] = _load_csv_as_news(months=None)
+if _all_hist:
+    _max_ts  = max(i["published_ts"] for i in _all_hist)
+    _cutoff6 = _max_ts - 6 * 30 * 24 * 3600
+    historical_news = [i for i in _all_hist if i["published_ts"] >= _cutoff6]
+else:
+    historical_news = []
 _hist_channels = {item["channel"] for item in historical_news}
-print(f"✅ Loaded {len(historical_news)} historical items (6mo) from news_cleaned_filtered_scored.csv")
+_log.info("Loaded %d historical items (6mo), %d total", len(historical_news), len(_all_hist))
 
-# Full historical (all dates) — used only for /news/dates and /news/by-date calendar
-# Loaded as lightweight {published_ts, channel, title, link, model_score} to avoid memory bloat
-def _load_hist_dates_index() -> List[dict]:
-    """Load full date range from CSV — minimal fields only, for calendar index."""
-    items = _load_csv_as_news(months=None)
-    return [{"published_ts": i["published_ts"], "title": i["title"],
-             "channel": i["channel"], "link": i.get("link",""),
-             "model_score": i["model_score"], "sentiment": i.get("sentiment",""),
-             "confidence": i.get("confidence", 50), "impact": i.get("impact","low"),
-             "score_normalized": True} for i in items]
-
-historical_dates_index: List[dict] = _load_hist_dates_index()
-print(f"✅ Loaded {len(historical_dates_index)} dates-index items (full range)")
+# Slim index for /news/dates and /news/by-date — derived from the already-parsed full set.
+historical_dates_index: List[dict] = [
+    {"published_ts": i["published_ts"], "title": i["title"],
+     "channel": i["channel"], "link": i.get("link", ""),
+     "model_score": i["model_score"], "sentiment": i.get("sentiment", ""),
+     "confidence": i.get("confidence", 50), "impact": i.get("impact", "low"),
+     "score_normalized": True}
+    for i in _all_hist
+]
+_log.info("Dates index: %d items (full range)", len(historical_dates_index))
+del _all_hist  # free the full list; both views above hold what's needed
 
 
 def _compute_full_stats() -> dict:
@@ -261,11 +357,9 @@ def _compute_full_stats() -> dict:
     with open(HIST_CSV, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             try:
-                ch = row.get("channel", "") or "unknown"
-                if ch in _CHANNEL_NORM:
-                    ch = _CHANNEL_NORM[ch]
-                    if ch is None:
-                        continue
+                ch = _normalize_channel(row.get("channel", "") or "unknown")
+                if ch is None:
+                    continue
                 if ch in BLOCKED_CHANNELS:
                     continue
 
@@ -279,9 +373,9 @@ def _compute_full_stats() -> dict:
                 btc_15m   = float(row["btc_price_15m"])
                 btc_1h    = float(row["btc_price_1h"])
                 btc_c15m  = (btc_15m - btc_price) / btc_price * 100
-                btc_c1h   = (btc_1h  - btc_price) / btc_price * 100
                 impact_score = min(1.0, 0.52 + abs(btc_c15m) / 6.0)
-                conf     = float(row.get("confidence") or 50)
+                conf     = float(row.get("confidence") or 0.5)
+                if conf <= 1.0: conf *= 100
                 weight   = float(row.get("weight") or 5)
                 sent     = row.get("sentiment", "neutral")
 
@@ -354,18 +448,23 @@ def _compute_full_stats() -> dict:
 
 
 _full_analyze_stats: dict = _compute_full_stats()
-print(f"✅ Full analyze stats computed: {_full_analyze_stats.get('total', 0):,} items "
-      f"({_full_analyze_stats.get('date_from')} → {_full_analyze_stats.get('date_to')})")
+_log.info(
+    "Full analyze stats computed: %d items (%s → %s)",
+    _full_analyze_stats.get("total", 0),
+    _full_analyze_stats.get("date_from"),
+    _full_analyze_stats.get("date_to"),
+)
 
 
 import asyncio
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
-async def lifespan(_app):
+async def lifespan(_):
     global _last_cache_mtime
     _last_cache_mtime = CACHE_FILE.stat().st_mtime if CACHE_FILE.exists() else 0.0
     asyncio.create_task(_cache_refresh_loop())
+    asyncio.create_task(_prune_rate_limits())
     yield
 
 # ── App setup ─────────────────────────────────────────────────────
@@ -405,6 +504,17 @@ async def _broadcast(clients: set, item: dict):
 # ── Background cache refresh ──────────────────────────────────────
 _last_cache_mtime: float = 0.0
 
+async def _prune_rate_limits():
+    """Periodically remove stale IP entries to bound _rate_limits memory."""
+    while True:
+        await asyncio.sleep(300)
+        cutoff = time.time() - 60
+        stale = [ip for ip, ts_list in list(_rate_limits.items())
+                 if not any(t > cutoff for t in ts_list)]
+        for ip in stale:
+            _rate_limits.pop(ip, None)
+
+
 async def _cache_refresh_loop():
     global all_news, hot_news, _last_cache_mtime, _idf_cache
     while True:
@@ -425,14 +535,14 @@ async def _cache_refresh_loop():
                                    abs(float(i.get("model_score_1h", 0)))) >= SCORE_HOT]
                 _idf_cache = None
                 _last_cache_mtime = mtime
-                print(f"🔄 Cache refreshed: {len(all_news)} items, {len(fresh)} new")
+                _log.info("Cache refreshed: %d items, %d new", len(all_news), len(fresh))
                 for item in fresh:
                     await _broadcast(_ws_all_clients, item)
                     if max(abs(float(item.get("model_score", 0))),
                            abs(float(item.get("model_score_1h", 0)))) >= SCORE_HOT:
                         await _broadcast(_ws_hot_clients, item)
         except Exception as exc:
-            print(f"⚠️  Cache refresh error: {exc}")
+            _log.error("Cache refresh error: %s", exc)
 
 
 
@@ -469,7 +579,7 @@ _INGEST_API_KEY = os.getenv("INGEST_API_KEY", "")
 
 
 @app.post("/news")
-async def ingest_news(item: dict, x_api_key: str = Header(default="")):
+async def ingest_news(item: IngestNewsItem, x_api_key: str = Header(default="")):
     """Receive a scored news item from main.py and persist it to the cache.
 
     This is a WRITE endpoint (it mutates the cache and broadcasts to every
@@ -479,28 +589,31 @@ async def ingest_news(item: dict, x_api_key: str = Header(default="")):
     """
     if not _INGEST_API_KEY:
         raise HTTPException(status_code=503, detail="Ingest disabled: INGEST_API_KEY not configured")
-    if x_api_key != _INGEST_API_KEY:
+    if not secrets.compare_digest(x_api_key, _INGEST_API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
 
     global all_news, hot_news, _idf_cache
 
-    # Normalise channel name
-    ch = item.get("channel", "")
-    if ch in _CHANNEL_NORM:
-        norm = _CHANNEL_NORM[ch]
-        if norm is None:
-            return {"status": "blocked"}
-        item["channel"] = norm
+    # Convert Pydantic model to plain dict so we can freely mutate it
+    data: dict = item.model_dump()
 
-    if item.get("channel") in BLOCKED_CHANNELS:
+    # Normalise channel name
+    norm = _normalize_channel(data.get("channel", ""))
+    if norm is None:
+        return {"status": "blocked"}
+    data["channel"] = norm
+
+    if data.get("channel") in BLOCKED_CHANNELS:
         return {"status": "blocked"}
 
-    if not _passes_noise_filter(item):
+    if not _passes_noise_filter(data):
         return {"status": "filtered"}
 
-    # Ensure published_ts exists
-    if "published_ts" not in item and item.get("id"):
-        item["published_ts"] = int(item["id"]) // 1000
+    # Ensure published_ts exists (id is now a hex string, not a numeric timestamp)
+    if not data.get("published_ts"):
+        data["published_ts"] = int(time.time())
+
+    item = data   # type: ignore[assignment]  — work with the dict from here on
 
     # Deduplicate by id
     existing_ids = {i.get("id") for i in all_news}
@@ -515,15 +628,22 @@ async def ingest_news(item: dict, x_api_key: str = Header(default="")):
         hot_news = ([item] + hot_news)[:MAX]
     _idf_cache = None
 
-    # Persist to cache file atomically
-    try:
-        tmp = CACHE_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(all_news, default=str), encoding="utf-8")
-        tmp.replace(CACHE_FILE)
+    # Persist to cache file atomically — offloaded so json.dumps + disk I/O
+    # don't block the event loop (O(N) work per ingest call).
+    _snapshot = list(all_news)
+    async def _write_cache():
         global _last_cache_mtime
-        _last_cache_mtime = CACHE_FILE.stat().st_mtime
-    except Exception as e:
-        print(f"⚠️  Cache write error: {e}")
+        try:
+            def _do_write():
+                tmp = CACHE_FILE.with_suffix(".tmp")
+                tmp.write_text(json.dumps(_snapshot, default=str), encoding="utf-8")
+                tmp.replace(CACHE_FILE)
+                return CACHE_FILE.stat().st_mtime
+            mtime = await asyncio.to_thread(_do_write)
+            _last_cache_mtime = mtime
+        except Exception as e:
+            _log.error("Cache write failed: %s", e)
+    asyncio.create_task(_write_cache())
 
     # Broadcast to WebSocket clients
     await _broadcast(_ws_all_clients, item)
@@ -585,12 +705,22 @@ def health():
 
 
 @app.get("/news/all")
-def get_all():
+def get_all(response: Response, limit: int = 500, offset: int = 0):
+    """Return paginated news. Default page is 500 items.
+
+    Use ?limit=N&offset=M for cursor-style pagination. Clients should
+    request only what they render — avoid limit > 2000.
+    """
     combined = sorted(
         all_news + historical_news,
         key=lambda x: x.get("published_ts") or x.get("received_at") or 0,
+        reverse=True,
     )
-    return combined[-20000:]
+    limit = max(1, min(limit, 2000))
+    page  = combined[offset: offset + limit]
+    response.headers["Cache-Control"] = "public, max-age=30"
+    response.headers["X-Total-Count"]  = str(len(combined))
+    return page
 
 
 @app.get("/news/hot")
@@ -631,9 +761,9 @@ def get_training_stats():
         "v6":           ROOT / "production_results_v6.json",
         "v7":           ROOT / "production_results_v7.json",
         "v8":           ROOT / "production_results_v8.json",
-        "v9":           ROOT / "production_results_v9.json",
-        "xgboost_v10":  ROOT / "xgboost_v10_groq_results.json",
-        "xgboost_v9":   ROOT / "xgboost_v9_results.json",
+        "ann_bert":     ROOT / "ann_bert_results.json",
+        "xgboost_groq": ROOT / "xgb_groq_results.json",
+        "xgboost_bert": ROOT / "xgb_bert_results.json",
         "xgboost":      ROOT / "xgboost_results.json",
     }
     all_models: dict = {}
@@ -642,8 +772,8 @@ def get_training_stats():
             with open(path, encoding="utf-8") as f:
                 all_models[name] = json.load(f)
 
-    # Current best model = xgboost_v10 → xgboost_v9 → v9 → v8 → ...
-    best = next((k for k in ["xgboost_v10","xgboost_v9","v9","v8","v7","v6","v5"] if k in all_models), None)
+    # Current best model = xgboost_groq → xgboost_bert → v9 → v8 → ...
+    best = next((k for k in ["xgboost_groq","xgboost_bert","v9","v8","v7","v6","v5"] if k in all_models), None)
     if best:
         stats["model_performance"] = all_models[best]
     stats["all_models"] = all_models
@@ -671,7 +801,9 @@ def get_training_stats():
                 channels[ch] = channels.get(ch, 0) + 1
                 try: weights.append(float(row["weight"]))
                 except (ValueError, KeyError, TypeError): pass
-                try: confidences.append(float(row["confidence"]))
+                try:
+                    c = float(row["confidence"])
+                    confidences.append(c * 100 if c <= 1.0 else c)
                 except (ValueError, KeyError, TypeError): pass
                 try:
                     bp   = float(row["btc_price_at_news"])
@@ -770,12 +902,12 @@ def get_report_summary():
     import datetime
 
     csv_path     = ROOT / "news_cleaned_filtered.csv"
-    # Prefer xgboost_v10 → xgboost_v9 → v9 ANN → v8 ANN
+    # Prefer xgboost_groq → xgboost_bert → ann_bert → v8 ANN
     results_path = next(
         (p for p in [
-            ROOT / "xgboost_v10_groq_results.json",
-            ROOT / "xgboost_v9_results.json",
-            ROOT / "production_results_v9.json",
+            ROOT / "xgb_groq_results.json",
+            ROOT / "xgb_bert_results.json",
+            ROOT / "ann_bert_results.json",
             ROOT / "production_results_v8.json",
         ] if p.exists()),
         ROOT / "production_results_v8.json",
@@ -896,10 +1028,14 @@ def get_report_summary():
         with open(results_path, encoding="utf-8") as f:
             model_results = json.load(f)
 
+    # Derive metrics from the results JSON — never hardcode them here.
+    _r15 = model_results.get("15_minute", {})
+    _r1h = model_results.get("1_hour", {})
     architecture = {
         "name":       "XGBoost v10 (DualBERT + Groq/Llama-3.3-70B Sentiment)",
         "type":       "Gradient Boosted Trees — GPU (device=cuda, tree_method=hist)",
-        "file":       "xgboost_v10_groq.py",
+        "file":       "xgboost_train_groq.py",
+        "results_source": str(results_path.name) if results_path.exists() else "not found",
         "feature_dim": 1562,
         "feature_layout": [
             {"name": "CryptoBERT embedding",    "dims": 768},
@@ -916,14 +1052,19 @@ def get_report_summary():
             "subsample": 0.8, "colsample_bytree": 0.6, "min_child_weight": 5,
             "reg_alpha": 0.1, "reg_lambda": 1.0, "early_stopping_rounds": 20,
         },
-        "threshold_15m": 0.295,
-        "threshold_1h":  0.265,
+        "threshold_15m": model_results.get("threshold_15m"),
+        "threshold_1h":  model_results.get("threshold_1h"),
         "min_precision": 0.20,
         "monthly_seed":  43,
-        "roc_auc_15m":   0.677,
-        "roc_auc_1h":    0.657,
-        "f1_15m":        0.395,
-        "f1_1h":         0.457,
+        # Metrics read from results JSON — regenerate by running training/xgboost_train_bert.py
+        "roc_auc_15m": _r15.get("ROC_AUC"),
+        "roc_auc_1h":  _r1h.get("ROC_AUC"),
+        "f1_15m":      _r15.get("F1"),
+        "f1_1h":       _r1h.get("F1"),
+        "precision_15m": _r15.get("Precision"),
+        "recall_15m":  _r15.get("Recall"),
+        "precision_1h":  _r1h.get("Precision"),
+        "recall_1h":   _r1h.get("Recall"),
     }
 
     eval_csv = ROOT / "ews_ev.csv"
@@ -1014,14 +1155,15 @@ def _get_idf() -> dict:
 
 
 @app.post("/news/similar")
-async def find_similar(item: dict):
-    title = (item.get("title") or "").strip()
+async def find_similar(request: Request, item: SimilarRequest):
+    _check_rate_limit(_client_ip(request), rpm=30)
+    title = item.title.strip()
     if not title:
         return {"similar": []}
 
     # Items that came from live ingestion already carry pre-computed similar list
-    if item.get("similar"):
-        return {"similar": item["similar"]}
+    if item.similar:
+        return {"similar": item.similar}
 
     idf      = _get_idf()
     q_tokens = _tokens(title)
@@ -1051,18 +1193,18 @@ async def find_similar(item: dict):
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 @app.post("/news/explain")
-async def explain_news(request: Request, item: dict):
+async def explain_news(request: Request, item: ExplainRequest):
     # Rate limit: 10 req/min for this expensive Groq-backed endpoint
-    _check_rate_limit(request.client.host if request.client else "unknown", rpm=10)
-    title     = item.get("title", "")
-    sentiment = item.get("sentiment", "neutral")
-    confidence= item.get("confidence", 50)
-    score     = abs(float(item.get("model_score", 0)))
-    score_1h  = abs(float(item.get("model_score_1h", 0)))
-    btc_15m   = float(item.get("btc_change_15m", 0))
-    btc_1h    = float(item.get("btc_change_1h",  0))
-    channel   = item.get("channel", "unknown")
-    similar   = item.get("similar", [])
+    _check_rate_limit(_client_ip(request), rpm=10)
+    title     = item.title
+    sentiment = item.sentiment
+    confidence= item.confidence
+    score     = abs(item.model_score)
+    score_1h  = abs(item.model_score_1h)
+    btc_15m   = item.btc_change_15m
+    btc_1h    = item.btc_change_1h
+    channel   = item.channel
+    similar   = item.similar
     max_score = max(score, score_1h)
     impact    = ("Hot"    if max_score >= SCORE_HOT  else
                  "Medium" if max_score >= SCORE_MED  else "Show")
@@ -1162,28 +1304,63 @@ async def proxy_klines(symbol: str = "BTCUSDT", interval: str = "1h",
         return {"error": str(e)}
 
 
+# Fan-out: one upstream Binance connection per stream key shared by all subscribers.
+# Without this, N browser tabs = N upstream sockets; Binance throttles at ~20.
+_stream_subs:     dict[str, set[WebSocket]] = {}  # key -> subscriber set
+_stream_tasks:    dict[str, asyncio.Task]   = {}  # key -> upstream task
+
+
+async def _binance_upstream(key: str, url: str):
+    """Maintain one upstream connection and broadcast to all subscribers."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.ws_connect(url) as bws:
+                async for msg in bws:
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        subs = list(_stream_subs.get(key, []))
+                        if not subs:
+                            return  # no subscribers left — stop upstream
+                        dead = []
+                        for sub in subs:
+                            try:
+                                await sub.send_text(msg.data)
+                            except Exception:
+                                dead.append(sub)
+                        for sub in dead:
+                            _stream_subs[key].discard(sub)
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        break
+    except Exception as e:
+        _log.error("Binance upstream error [%s]: %s", key, e)
+    finally:
+        _stream_tasks.pop(key, None)
+
+
 @app.websocket("/proxy/stream/{symbol}/{interval}")
 async def proxy_stream(ws: WebSocket, symbol: str, interval: str):
     if symbol.upper() not in _ALLOWED_SYMBOLS or interval not in _ALLOWED_INTERVALS:
         await ws.close(code=1008)
         return
     await ws.accept()
-    binance_url = f"wss://stream.binance.com:9443/ws/{symbol.lower()}@kline_{interval}"
+    key = f"{symbol.lower()}@kline_{interval}"
+    _stream_subs.setdefault(key, set()).add(ws)
+    if key not in _stream_tasks or _stream_tasks[key].done():
+        url = f"wss://stream.binance.com:9443/ws/{key}"
+        _stream_tasks[key] = asyncio.create_task(_binance_upstream(key, url))
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.ws_connect(binance_url) as bws:
-                async for msg in bws:
-                    if msg.type == aiohttp.WSMsgType.TEXT:
-                        await ws.send_text(msg.data)
-                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                        break
+        # Hold the socket open until the client disconnects.
+        while True:
+            await ws.receive_text()
     except WebSocketDisconnect:
         pass
-    except Exception as e:
-        print(f"Binance proxy stream error: {e}")
+    except Exception:
+        pass
     finally:
-        try: await ws.close()
-        except Exception: pass
+        _stream_subs.get(key, set()).discard(ws)
+        try:
+            await ws.close()
+        except Exception:
+            pass
 
 
 # ── Custom news analyzer ──────────────────────────────────────────
@@ -1193,11 +1370,11 @@ def _get_analyzer_models():
     if _analyzer_models:
         return _analyzer_models
     from training.create_sample_cache import _load_bert_models, _load_xgb
-    print("🔄 Loading BERT + XGBoost models for custom analyzer (CPU)...")
+    _log.info("Loading BERT + XGBoost models for custom analyzer (CPU)...")
     bert = _load_bert_models(force_cpu=True)
-    clf15, _clf1h, scaler, thr15, _thr1h = _load_xgb()
+    clf15, _, scaler, thr15, _ = _load_xgb()
     _analyzer_models.update({"bert": bert, "clf15": clf15, "scaler": scaler, "thr15": thr15})
-    print("✅ Analyzer models ready")
+    _log.info("Analyzer models ready")
     return _analyzer_models
 
 @app.get("/analyze/full-stats")
@@ -1206,13 +1383,8 @@ def get_full_stats():
     return _full_analyze_stats
 
 
-@app.post("/analyze/custom")
-async def analyze_custom(body: dict):
-    title = (body.get("title") or "").strip()
-    if len(title) < 5:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail="Title too short")
-
+def _analyze_custom_sync(title: str) -> dict:
+    """Synchronous ML inference for /analyze/custom — run via asyncio.to_thread."""
     from datetime import datetime, timezone as _tz
     from training.create_sample_cache import _encode, _build_sentiment, _build_features
     import numpy as np
@@ -1230,39 +1402,28 @@ async def analyze_custom(body: dict):
         cb_pos = float(cb_probs[2]); cb_neg = float(cb_probs[0])
         fb_pos = fb_neg = rb_pos = rb_neg = 0.0
 
-        # Use full 3-model ensemble for sentiment.
-        # CryptoBERT gets 50% weight — only crypto-domain model.
-        # Direction is judged by pos vs neg ratio, ignoring neutral mass so that
-        # factual-but-bullish headlines ("record inflows", "ETF approved") aren't
-        # silently swallowed into neutral.
+        # 3-model ensemble — identical to main.py Step 1b and training pipeline.
         try:
             from services.sentiment_score import load_models as _load_sent
+            from services.ensemble import (
+                ensemble_probs as _ens_probs, sentiment_from_probs as _sent_from_probs,
+                FB_PROMPT as _FB_PROMPT, RB_PROMPT as _RB_PROMPT,
+            )
             sm = _load_sent()
-            btc_ctx = f"Bitcoin price impact: {title}"
-            fb_raw = sm["fb"](btc_ctx, truncation=True)[0]
+            fb_raw = sm["fb"](_FB_PROMPT.format(title=title), truncation=True)[0]
             fb = {s["label"].lower(): s["score"] for s in fb_raw}
-            rb_raw = sm["rb"](btc_ctx, truncation=True)[0]
+            rb_raw = sm["rb"](_RB_PROMPT.format(title=title), truncation=True)[0]
             rb = {s["label"].lower(): s["score"] for s in rb_raw}
-            fb_pos, fb_neg = fb.get("positive", 0), fb.get("negative", 0)
-            rb_pos, rb_neg = rb.get("positive", 0), rb.get("negative", 0)
-            # CryptoBERT: 50%, FinBERT: 25%, RoBERTa: 25%
-            avg_pos = cb_pos * 0.5 + fb_pos * 0.25 + rb_pos * 0.25
-            avg_neg = cb_neg * 0.5 + fb_neg * 0.25 + rb_neg * 0.25
-            avg_neu = max(0.0, 1 - avg_pos - avg_neg)
-            # Judge direction by pos-vs-neg ratio, not by neutral mass.
-            # Neutral only when pos and neg are nearly equal (ratio < 1.5x).
-            if avg_pos == 0 and avg_neg == 0:
-                ens_sent, ens_conf, ens_disc = "neutral", avg_neu, 0
-            elif avg_pos >= avg_neg * 1.5:
-                net = avg_pos - avg_neg
-                ens_disc = (3 if net > 0.50 else 2 if net > 0.25 else 1 if net > 0.05 else 1)
-                ens_sent, ens_conf = "positive", avg_pos
-            elif avg_neg >= avg_pos * 1.5:
-                net = avg_neg - avg_pos
-                ens_disc = -(3 if net > 0.50 else 2 if net > 0.25 else 1 if net > 0.05 else 1)
-                ens_sent, ens_conf = "negative", avg_neg
-            else:
-                ens_sent, ens_conf, ens_disc = "neutral", avg_neu, 0
+            cb_neu = max(0.0, 1 - cb_pos - cb_neg)
+            fb_pos, fb_neg, fb_neu = fb.get("positive", 0), fb.get("negative", 0), fb.get("neutral", 0)
+            rb_pos, rb_neg, rb_neu = rb.get("positive", 0), rb.get("negative", 0), rb.get("neutral", 0)
+            ens = _ens_probs(
+                (cb_pos, cb_neg, cb_neu),
+                (fb_pos, fb_neg, fb_neu),
+                (rb_pos, rb_neg, rb_neu),
+            )
+            avg_pos, avg_neg, avg_neu = ens.pop("_avg")
+            ens_sent, ens_disc, ens_conf = _sent_from_probs(avg_pos, avg_neg, avg_neu)
             sent = _build_sentiment(cb_probs)
             sent["sentiment"] = ens_sent
             sent["sentiment_score"] = ens_disc
@@ -1271,22 +1432,23 @@ async def analyze_custom(body: dict):
             sent["prob_negative"] = round(avg_neg, 4)
             sent["prob_neutral"]  = round(avg_neu, 4)
         except Exception:
-            # Fallback: CryptoBERT only — still use ratio logic, not neutral-wins
-            cb_p = float(cb_probs[2]); cb_n = float(cb_probs[0]); cb_neu = float(cb_probs[1])
-            if cb_p >= cb_n * 1.5:
-                disc = (3 if cb_p-cb_n > 0.50 else 2 if cb_p-cb_n > 0.25 else 1)
-                sent = _build_sentiment(cb_probs)
-                sent["sentiment"] = "positive"
-                sent["sentiment_score"] = disc
-                sent["confidence"] = round(cb_p * 100, 2)
-            elif cb_n >= cb_p * 1.5:
-                disc = -(3 if cb_n-cb_p > 0.50 else 2 if cb_n-cb_p > 0.25 else 1)
-                sent = _build_sentiment(cb_probs)
-                sent["sentiment"] = "negative"
-                sent["sentiment_score"] = disc
-                sent["confidence"] = round(cb_n * 100, 2)
+            # Fallback: CryptoBERT only with neutral-wins rule
+            cb_neu_fb = max(0.0, 1 - cb_pos - cb_neg)
+            if cb_neu_fb > max(cb_pos, cb_neg):
+                ens_sent, ens_disc, ens_conf = "neutral", 0, cb_neu_fb
+            elif cb_pos > cb_neg:
+                net = cb_pos - cb_neg
+                ens_disc = 3 if net > 0.50 else 2 if net > 0.25 else 1
+                ens_sent, ens_conf = "positive", cb_pos
             else:
-                sent = _build_sentiment(cb_probs)
+                net = cb_neg - cb_pos
+                ens_disc = -(3 if net > 0.50 else 2 if net > 0.25 else 1)
+                ens_sent, ens_conf = "negative", cb_neg
+            sent = _build_sentiment(cb_probs)
+            sent["sentiment"] = ens_sent
+            sent["sentiment_score"] = ens_disc
+            sent["confidence"] = round(ens_conf * 100, 2)
+            fb_pos = fb_neg = rb_pos = rb_neg = 0.0
 
         pub_dt = datetime.now(tz=_tz.utc)
         features = _build_features(cb_emb, fb_emb, sent, pub_dt)
@@ -1301,7 +1463,7 @@ async def analyze_custom(body: dict):
                   "Medium" if p15 >= SCORE_MED  else "Show")
         signal = "BUY" if sent["sentiment"] == "positive" else ("SELL" if sent["sentiment"] == "negative" else "NEUTRAL")
 
-        from training.xgboost_v10_groq import crypto_news_type_classify
+        from training.xgboost_train_groq import crypto_news_type_classify
         type_probs = crypto_news_type_classify(cb_emb.reshape(1, -1))[0]
         TYPE_LABELS = ["regulatory","partnership","product","hack_security","market_move",
                        "macro","adoption","exchange","defi","nft","other"]
@@ -1341,19 +1503,19 @@ async def analyze_custom(body: dict):
             model_votes = "CryptoBERT only"
         explanation = (
             f"Classified as {type_label} news. "
-            f"Model votes: {model_votes}. Final: {sent_word} (CryptoBERT weighted 50%). "
+            f"Model votes: {model_votes}. Final: {sent_word} (equal 1/3 ensemble). "
             f"{'Short-term price impact predicted.' if impact in ('Hot','Medium') else 'No strong short-term price impact predicted.'}"
         )
 
         try:
             bert_scores = [{"name": "CryptoBERT", "pos": round(cb_pos*100,1), "neg": round(cb_neg*100,1),
-                             "neu": round(max(0,(1-cb_pos-cb_neg))*100,1), "weight": 50}]
+                             "neu": round(max(0,(1-cb_pos-cb_neg))*100,1), "weight": 33}]
             if fb_pos > 0 or fb_neg > 0:
                 bert_scores.append({"name": "FinBERT", "pos": round(fb_pos*100,1), "neg": round(fb_neg*100,1),
-                                    "neu": round(max(0,(1-fb_pos-fb_neg))*100,1), "weight": 25})
+                                    "neu": round(max(0,(1-fb_pos-fb_neg))*100,1), "weight": 33})
             if rb_pos > 0 or rb_neg > 0:
                 bert_scores.append({"name": "RoBERTa", "pos": round(rb_pos*100,1), "neg": round(rb_neg*100,1),
-                                    "neu": round(max(0,(1-rb_pos-rb_neg))*100,1), "weight": 25})
+                                    "neu": round(max(0,(1-rb_pos-rb_neg))*100,1), "weight": 33})
         except Exception:
             bert_scores = []
 
@@ -1379,7 +1541,15 @@ async def analyze_custom(body: dict):
             "bert_scores":    bert_scores,
         }
     except Exception as e:
-        from fastapi import HTTPException
+        raise RuntimeError(str(e))
+
+
+@app.post("/analyze/custom")
+async def analyze_custom(request: Request, body: AnalyzeRequest):
+    _check_rate_limit(_client_ip(request), rpm=20)
+    try:
+        return await asyncio.to_thread(_analyze_custom_sync, body.title)
+    except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 

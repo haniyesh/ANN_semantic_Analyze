@@ -1,18 +1,18 @@
 """
-score_historical_xgb_v10.py
-============================
+score_historical_xgb_groq.py
+=============================
 Score the last 3 months of news_cleaned_filtered_scored.csv using
-XGBoost v10 (Groq/Llama-3.3-70B sentiment) and write to news_cache.json.
+the XGBoost Groq trainer (Groq/Llama-3.3-70B sentiment) and write to news_cache.json.
 
-Changes from v9:
+Differences from the BERT scorer:
   - Groq LLM sentiment features instead of 3-BERT ensemble
   - MONTHS_WINDOW = 3 (last 3 months only, dashboard-optimised)
-  - source field: "historical_xgb_v10"
+  - source field: "historical_xgb_groq"
 
 Usage:
     cd /project_root
-    .venv311/bin/python training/score_historical_xgb_v10.py
-    .venv311/bin/python training/score_historical_xgb_v10.py --dry-run   # no write
+    .venv311/bin/python training/score_historical_xgb_groq.py
+    .venv311/bin/python training/score_historical_xgb_groq.py --dry-run   # no write
 """
 
 import sys, json, pickle, warnings, argparse, hashlib
@@ -28,7 +28,7 @@ HERE   = Path(__file__).parent
 ROOT   = HERE.parent
 sys.path.insert(0, str(ROOT))
 
-from training.xgboost_v10_groq import (
+from training.xgboost_train_groq import (
     compute_cryptobert_embeddings,
     compute_finbert_embeddings,
     build_macro_features,
@@ -37,7 +37,6 @@ from training.xgboost_v10_groq import (
     build_groq_features,
     NEWS_TYPE_LABELS,
     DUAL_EMB_DIM,
-    XGB_MODEL_BASE,
     GROQ_CACHE,
 )
 
@@ -50,13 +49,13 @@ from pipeline.reduce_noise import (
 )
 
 CSV_PATH     = ROOT / "news_cleaned_filtered_scored.csv"
-CACHE_FILE   = ROOT / "news_cache.json"
-CLF15_PATH   = str(XGB_MODEL_BASE) + "_clf15m.json"
-CLF1H_PATH   = str(XGB_MODEL_BASE) + "_clf1h.json"
-SCALER_PATH  = str(XGB_MODEL_BASE) + "_scaler.pkl"
-RESULTS_PATH = ROOT / "xgboost_v10_groq_results.json"
+CACHE_FILE   = ROOT / "storage" / "news_cache.json"
+CLF15_PATH   = str(ROOT / "xgb_impact_clf_15m_groq.json")
+CLF1H_PATH   = str(ROOT / "xgb_impact_clf_1h_groq.json")
+SCALER_PATH  = str(ROOT / "xgb_feature_scaler_groq.pkl")
+RESULTS_PATH = ROOT / "xgb_groq_results.json"
 MONTHLY_SEED = 43
-MONTHS_WINDOW = 1   # last 1 month only
+MONTHS_WINDOW = 3   # last 3 months
 
 
 # ── 1. Load CSV ──────────────────────────────────────────────────
@@ -124,7 +123,7 @@ def build_features(df: pd.DataFrame) -> tuple[np.ndarray, int]:
 def load_models():
     if not Path(CLF15_PATH).exists():
         print(f"  ✗ Model not found: {CLF15_PATH}")
-        print(f"    Run training/xgboost_v10_groq.py first.")
+        print(f"    Run training/xgboost_train_groq.py first.")
         sys.exit(1)
 
     clf_15m = xgb.XGBClassifier(); clf_15m.load_model(CLF15_PATH)
@@ -183,7 +182,7 @@ def check_groq_coverage(df: pd.DataFrame):
     print(f"  Groq cache coverage: {cached:,}/{len(titles):,} ({pct:.1f}%)")
     if missing > 0:
         print(f"  ⚠ {missing:,} titles not in cache → will show as 'neutral'")
-        print(f"    To fill: python training/xgboost_v10_groq.py --groq-sample {len(titles)} --groq-limit {missing}")
+        print(f"    To fill: python training/xgboost_train_groq.py --groq-sample {len(titles)} --groq-limit {missing}")
 
 
 # ── 6. Convert to cache items ────────────────────────────────────
@@ -238,7 +237,7 @@ def to_cache_items(df: pd.DataFrame, p15: np.ndarray, p1h: np.ndarray,
             "direction":       int(float(row.get("btc_change_15m") or 0) > 0),
             "impact":          impact,
             "news_type":       str(row.get("news_type", "")),
-            "source":          "historical_xgb_v10",
+            "source":          "historical_xgb_groq",
         })
     return items
 
@@ -251,7 +250,7 @@ def load_live_cache() -> list:
         from datetime import timezone
         data  = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
         items = data if isinstance(data, list) else data.get("news", [])
-        HIST_SOURCES = {"historical_v6", "historical_v8", "historical_xgb_v9", "historical_xgb_v10"}
+        HIST_SOURCES = {"historical_v6", "historical_v8", "historical_xgb_v9", "historical_xgb_v10", "historical_xgb_groq"}
         cutoff_ts = (datetime.now(timezone.utc) - pd.DateOffset(months=MONTHS_WINDOW)).timestamp()
         live = [x for x in items
                 if x.get("source") not in HIST_SOURCES
@@ -320,7 +319,7 @@ def main():
             "hist_items":     len(hist_items),
             "months_window":  MONTHS_WINDOW,
             "generated_at":   datetime.now(timezone.utc).isoformat(),
-            "model":          "xgboost_v10_groq",
+            "model":          "xgboost_groq",
             "sentiment_model": "groq/llama-3.3-70b-versatile",
         },
         "news": merged,

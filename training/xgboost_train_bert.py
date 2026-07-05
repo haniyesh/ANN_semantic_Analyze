@@ -1,7 +1,7 @@
 """
-XGBoost Comparison System — v9
-================================
-Mirrors v9.py (ANN pipeline) exactly:
+XGBoost Trainer — BERT Ensemble Sentiment
+==========================================
+Mirrors ann_train.py pipeline exactly:
   - Same dual CryptoBERT+FinBERT embeddings (DUAL_EMB_DIM=1536)
   - Same ensemble sentiment features (3-BERT: cb/fb/rb probs + net_agreement)
   - Same price-context macro features (btc_vol, btc_mom, fear_greed)
@@ -11,18 +11,22 @@ Mirrors v9.py (ANN pipeline) exactly:
   - Naive baselines reported alongside model metrics
 
 Usage:
-    python xgboost_v9.py                 # train + evaluate
-    python xgboost_v9.py --compare       # also show ANN vs XGBoost table
-    python xgboost_v9.py --skip-rag      # skip RAG (faster debug run)
-    python xgboost_v9.py --load-only     # load saved models, skip training
+    python xgboost_train_bert.py                 # train + evaluate
+    python xgboost_train_bert.py --compare       # also show ANN vs XGBoost table
+    python xgboost_train_bert.py --skip-rag      # skip RAG (faster debug run)
+    python xgboost_train_bert.py --load-only     # load saved models, skip training
 """
 
-import os, json, warnings, argparse
+import os, sys, json, warnings, argparse
 from pathlib import Path
 import numpy as np
 import pandas as pd
 
 warnings.filterwarnings("ignore")
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))             # pipeline.*
+sys.path.insert(0, str(ROOT / "training"))  # sibling training scripts
 
 import torch
 import torch.nn.functional as F
@@ -40,15 +44,15 @@ load_dotenv()
 # ══════════════════════════════════════════════════════════════════
 HERE             = Path(__file__).parent.parent  # project root
 SENTIMENT_CSV    = HERE / "news_cleaned_filtered_scored.csv"
-CRYPTOBERT_CACHE = HERE / "cryptobert_v8_pipeline.npy"
-FINBERT_CACHE    = HERE / "finbert_v9_pipeline.npy"
+CRYPTOBERT_CACHE = HERE / "cryptobert_embeddings_cache.npy"
+FINBERT_CACHE    = HERE / "finbert_embeddings_cache.npy"
 FEAR_GREED_CACHE = HERE / "fear_greed_cache.json"
 FINBERT_MODEL    = "ProsusAI/finbert"
 DUAL_EMB_DIM     = 768 + 768
 
-XGB_MODEL_BASE   = HERE / "xgboost_v9"
-XGB_RESULTS_PATH = HERE / "xgboost_v9_results.json"
-ANN_RESULTS_PATH = HERE / "production_results_v9.json"
+XGB_MODEL_BASE   = HERE / "xgb"          # prefix for model artifact files
+XGB_RESULTS_PATH = HERE / "xgb_bert_results.json"
+ANN_RESULTS_PATH = HERE / "ann_bert_results.json"
 
 THRESHOLD_15M = 0.3
 THRESHOLD_1H  = 0.5
@@ -512,47 +516,6 @@ def print_comparison(xgb_results: dict):
         print(f"  🤝 TIE")
 
 
-def evaluate_baselines(y_tr_cls: np.ndarray, y_te_cls: np.ndarray,
-                       y_te_change: np.ndarray, label: str = "15m") -> dict:
-    """Naive baselines the model MUST beat to be meaningful.
-
-    - majority : always predict the majority training class
-    - random   : predict positive at the training positive rate (expected F1)
-    - always_pos: predict everything impactful (recall=1, precision=base rate)
-
-    Reports F1 so it is directly comparable to the model's F1.
-    """
-    pos_rate = float((y_tr_cls == 1).mean())
-    base_rate_te = float((y_te_cls == 1).mean())
-
-    # Majority class
-    majority_pred = np.zeros_like(y_te_cls) if pos_rate < 0.5 else np.ones_like(y_te_cls)
-    maj_f1 = f1_score(y_te_cls, majority_pred, zero_division=0)
-
-    # Always-positive
-    pos_pred = np.ones_like(y_te_cls)
-    pos_f1 = f1_score(y_te_cls, pos_pred, zero_division=0)
-
-    # Random at training prior (expected F1 = base_rate for this scheme)
-    rng = np.random.default_rng(MONTHLY_SEED)
-    rand_pred = (rng.random(len(y_te_cls)) < pos_rate).astype(int)
-    rand_f1 = f1_score(y_te_cls, rand_pred, zero_division=0)
-
-    out = {
-        "majority_f1": float(maj_f1),
-        "always_positive_f1": float(pos_f1),
-        "random_prior_f1": float(rand_f1),
-        "test_base_rate": base_rate_te,
-    }
-    print(f"\n  ── BASELINES ({label}) ──")
-    print(f"    Test base rate (positives): {base_rate_te:.3f}")
-    print(f"    Majority-class F1 : {maj_f1:.3f}")
-    print(f"    Always-positive F1: {pos_f1:.3f}")
-    print(f"    Random-prior F1   : {rand_f1:.3f}")
-    print(f"    → Model F1 must beat ALL of these to mean anything.")
-    return out
-
-
 def print_feature_importance(clf_15m, feat_names: list, top_n: int = 20):
     importances = clf_15m.feature_importances_
     pairs = sorted(zip(feat_names, importances), key=lambda x: -x[1])
@@ -676,9 +639,9 @@ def main():
     X_vl   = scaler.transform(X[vi]).astype(np.float32)
     X_te   = scaler.transform(X[te_idx]).astype(np.float32)
 
-    clf15_path = str(XGB_MODEL_BASE) + "_clf15m.json"
-    clf1h_path = str(XGB_MODEL_BASE) + "_clf1h.json"
-    reg15_path = str(XGB_MODEL_BASE) + "_reg15m.json"
+    clf15_path = str(HERE / "xgb_impact_clf_15m_bert.json")
+    clf1h_path = str(HERE / "xgb_impact_clf_1h_bert.json")
+    reg15_path = str(HERE / "xgb_price_reg_15m_bert.json")
 
     if args.load_only and Path(clf15_path).exists():
         import xgboost as xgb
@@ -697,10 +660,10 @@ def main():
         clf_1h.save_model(clf1h_path)
         reg_15m.save_model(reg15_path)
         import pickle
-        scaler_path = str(XGB_MODEL_BASE) + "_scaler.pkl"
+        scaler_path = str(HERE / "xgb_feature_scaler_bert.pkl")
         with open(scaler_path, "wb") as f:
             pickle.dump(scaler, f)
-        print(f"  Models + scaler saved → {XGB_MODEL_BASE}*")
+        print(f"  Models + scaler saved → {HERE}/xgb_*")
 
     print(f"\n[5/7] THRESHOLD SEARCH (min_precision={MIN_PRECISION})")
     p15_vl  = clf_15m.predict_proba(X_vl)[:, 1]
@@ -716,14 +679,27 @@ def main():
     r15_te   = reg_15m.predict(X_te)
     dir_pred = (p15_te >= 0.5).astype(int)
 
+    # Save per-row test predictions for bootstrap CIs / paired significance
+    # tests (used by training/compare_matrix.py).
+    preds_path = str(HERE / "xgb_bert_test_preds.npz")
+    np.savez(
+        preds_path,
+        p15=p15_te, p1h=p1h_te, r15=r15_te,
+        y_c15=y_c15[te_idx], y_c1h=y_c1h[te_idx],
+        y_r15=y_r15[te_idx], y_r1h=y_r1h[te_idx],
+        thr_15m=thr_15m, thr_1h=thr_1h,
+        published=df["published"].iloc[te_idx].astype("int64").values,
+    )
+    print(f"  Test predictions saved → {preds_path}")
+
     r15 = eval_horizon("15-minute", p15_te, thr_15m, y_c15[te_idx], r15_te, y_r15[te_idx])
     r1h = eval_horizon("1-hour",    p1h_te, thr_1h,  y_c1h[te_idx], r15_te, y_r1h[te_idx])
 
-    base_15 = evaluate_baselines(y_c15[tri], y_c15[te_idx], y_r15[te_idx], "15m")
-    base_1h = evaluate_baselines(y_c1h[tri], y_c1h[te_idx], y_r1h[te_idx], "1h")
-    if r15["F1"] <= max(base_15["majority_f1"], base_15["always_positive_f1"], base_15["random_prior_f1"]):
+    base_15 = evaluate_baselines(y_c15[te_idx], y_r15[te_idx], "15m")
+    base_1h = evaluate_baselines(y_c1h[te_idx], y_r1h[te_idx], "1h")
+    if r15["F1"] <= max(b["F1"] for b in base_15.values()):
         print("  ⚠️  15m model does NOT beat naive baselines — result is not meaningful.")
-    if r1h["F1"] <= max(base_1h["majority_f1"], base_1h["always_positive_f1"], base_1h["random_prior_f1"]):
+    if r1h["F1"] <= max(b["F1"] for b in base_1h.values()):
         print("  ⚠️  1h model does NOT beat naive baselines — result is not meaningful.")
 
     dir_acc = accuracy_score(y_dir[te_idx], dir_pred)
@@ -746,18 +722,8 @@ def main():
 
     print_feature_importance(clf_15m, feat_names)
 
-    # Baselines — essential for interpreting XGBoost performance
-    print(f"\n{'='*65}\n  BASELINES (test set)\n{'='*65}")
-    bl_15 = evaluate_baselines(y_c15[te_idx], y_r15[te_idx], "15m")
-    bl_1h = evaluate_baselines(y_c1h[te_idx], y_r1h[te_idx], "1h")
-    xgb_results["baselines_15m"] = bl_15
-    xgb_results["baselines_1h"]  = bl_1h
-    print(f"\n  XGBoost 15m F1={r15['F1']:.3f} vs best baseline F1={max(b['F1'] for b in bl_15.values()):.3f}")
-    print(f"  XGBoost 1h  F1={r1h['F1']:.3f} vs best baseline F1={max(b['F1'] for b in bl_1h.values()):.3f}")
-
-    # Re-save with baselines
-    with open(XGB_RESULTS_PATH, "w") as f:
-        json.dump(xgb_results, f, indent=2, default=str)
+    print(f"\n  XGBoost 15m F1={r15['F1']:.3f} vs best baseline F1={max(b['F1'] for b in base_15.values()):.3f}")
+    print(f"  XGBoost 1h  F1={r1h['F1']:.3f} vs best baseline F1={max(b['F1'] for b in base_1h.values()):.3f}")
 
     if args.compare or ANN_RESULTS_PATH.exists():
         print_comparison(xgb_results)

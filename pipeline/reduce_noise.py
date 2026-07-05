@@ -76,6 +76,10 @@ NOISE_TITLE_RE = re.compile(
     rf'{_COIN}\s+price\s+today|'
     rf'{_COIN}\s+price\s+(?:is\s+)?(?:now|currently)|'
     # ── JUST IN / BREAKING pure price alerts ─────────────────────────
+    # Filters bare price alerts ("BREAKING: Bitcoin hits $67K") but NOT
+    # event headlines ("BREAKING: SEC approves Bitcoin ETF").  Do NOT add
+    # a blanket ^breaking: pattern — those headlines are the best signal
+    # and are boosted by config.news_importance.
     # Filter: "JUST IN: $67,000 Bitcoin"  (price before coin, no context)
     rf'(?:just\s*in[:\*\s]{{1,6}}|breaking[:\*\s]{{1,6}}){_PRICE}\s*{_COIN}\b|'
     # Filter: "JUST IN: Bitcoin at/hits $67K"  (coin + movement + price, nothing else)
@@ -302,7 +306,6 @@ EXTRA_SPAM_PATTERNS = [
 
     # Generic filler
     r"^crypto news:",
-    r"^breaking:",
     r"top \d+ crypto",
     r"\+ more news$",
 ]

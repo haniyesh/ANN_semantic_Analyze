@@ -1,10 +1,14 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { createChart, CandlestickSeries, HistogramSeries, createSeriesMarkers } from "lightweight-charts";
+import {
+  createChart, CandlestickSeries, HistogramSeries, createSeriesMarkers,
+  UTCTimestamp, IChartApi, ISeriesApi, ISeriesMarkersPluginApi, Time,
+} from "lightweight-charts";
+import type { NewsItem, SimilarNews, FearGreed, ExplainResponse } from "./types";
 
 const API_BASE  = "/api";
 const WS_BASE   = `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/api`;
 const TZ_OFFSET = -new Date().getTimezoneOffset() * 60; // seconds offset from UTC to local
-const toLocal   = (ms) => ms / 1000 + TZ_OFFSET;        // Binance ms → local unix seconds
+const toLocal   = (ms: number): UTCTimestamp => (ms / 1000 + TZ_OFFSET) as UTCTimestamp;
 const toLocalDate = (ts) => {                            // unix seconds → local Date object
   const raw = ts < 4102444800 ? ts * 1000 : ts;
   return new Date(raw);
@@ -260,7 +264,7 @@ function ProbBars({ pos, neg, neu }) {
 
 // ── WebSocket hook ─────────────────────────────────────────────────
 function useWebSocket(path, onMessage) {
-  const wsRef = useRef(null);
+  const wsRef = useRef<WebSocket | null>(null);
   const [connected, setConnected] = useState(false);
   useEffect(() => {
     let retryTimer;
@@ -279,7 +283,7 @@ function useWebSocket(path, onMessage) {
 }
 
 // ── CalendarPicker ─────────────────────────────────────────────────
-function CalendarPicker({ selected, onChange, dbDates = [] }) {
+function CalendarPicker({ selected, onChange, dbDates = [] }: { selected: Date | null; onChange: (d: Date | null) => void; dbDates?: string[] }) {
   const today   = new Date();
   // Default view to the month that has the most recent data
   const latestDataDate = dbDates.length
@@ -349,20 +353,20 @@ function CalendarPicker({ selected, onChange, dbDates = [] }) {
 // ── Components ─────────────────────────────────────────────────────
 const INTERVAL_MAP = { "1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d" };
 
-function BinanceChart({ symbol, interval = "1h", news = [] }) {
-  const containerRef    = useRef(null);
-  const chartRef        = useRef(null);
-  const candleRef       = useRef(null);
-  const volRef          = useRef(null);
-  const wsRef           = useRef(null);
-  const markersRef      = useRef(null);
-  const candlesDataRef  = useRef([]);   // raw candles for price-signal detection
-  const markerNewsRef   = useRef(new Map()); // bucket time → news item, for tooltip
-  const [price, setPrice]   = useState(null);
-  const [change, setChange] = useState(null);
+function BinanceChart({ symbol, interval = "1h", news = [] }: { symbol: string; interval?: string; news?: NewsItem[] }) {
+  const containerRef    = useRef<HTMLDivElement | null>(null);
+  const chartRef        = useRef<IChartApi | null>(null);
+  const candleRef       = useRef<ISeriesApi<"Candlestick", Time> | null>(null);
+  const volRef          = useRef<ISeriesApi<"Histogram", Time> | null>(null);
+  const wsRef           = useRef<WebSocket | null>(null);
+  const markersRef      = useRef<ISeriesMarkersPluginApi<unknown> | null>(null);
+  const candlesDataRef  = useRef<{ time: UTCTimestamp; open: number; high: number; low: number; close: number }[]>([]);
+  const markerNewsRef   = useRef(new Map<number, NewsItem>());
+  const [price, setPrice]   = useState<number | null>(null);
+  const [change, setChange] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
-  const [candlesVer, setCandlesVer] = useState(0); // bumped when candles load
-  const [tooltip, setTooltip] = useState(null);    // { x, y, item }
+  const [candlesVer, setCandlesVer] = useState(0);
+  const [tooltip, setTooltip] = useState<{ x: number; y: number; item: NewsItem } | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -409,7 +413,7 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
     const ivMs = intervalMs[interval] || 3600000;
 
     (async () => {
-      const allKlines = [];
+      const allKlines: any[] = [];
       let startTime = startMs60d;
       const now = Date.now();
       try {
@@ -434,7 +438,7 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
         const last  = candles[candles.length - 1];
         const first = candles[0];
         setPrice(last.close);
-        setChange(((last.close - first.open) / first.open * 100).toFixed(2));
+        setChange((last.close - first.open) / first.open * 100);
         candlesDataRef.current = candles;
         setCandlesVer(v => v + 1);
         setLoading(false);
@@ -458,7 +462,7 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
       if (!param.time || !containerRef.current) { setTooltip(null); return; }
       const markerMap = markerNewsRef.current;
       const ivSec = { "1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400 }[interval] || 3600;
-      const bucket = Math.floor(param.time / ivSec) * ivSec;
+      const bucket = Math.floor((param.time as number) / ivSec) * ivSec;
       const item = markerMap.get(bucket);
       if (!item) { setTooltip(null); return; }
       const rect = containerRef.current.getBoundingClientRect();
@@ -490,12 +494,12 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
       .forEach(n => {
         const bucket = Math.floor((n.published_ts || 0) / ivSec) * ivSec;
         const prev = buckets.get(bucket);
-        if (!prev || Math.abs(n.model_score) > Math.abs(prev.model_score || 0))
+        if (!prev || Math.abs(n.model_score ?? 0) > Math.abs(prev.model_score || 0))
           buckets.set(bucket, n);
       });
     // Save bucket→news for tooltip lookup
     markerNewsRef.current = new Map();
-    const newsSignals = [];
+    const newsSignals: any[] = [];
     buckets.forEach((n, bucket) => {
       const isHot = Math.abs(n.model_score || 0) >= SCORE_HOT;
       const t     = bucket + TZ_OFFSET;
@@ -516,7 +520,7 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
     } catch {}
   }, [news, interval, candlesVer]);
 
-  const isUp = change >= 0;
+  const isUp = (change ?? 0) >= 0;
   return (
     <div style={{ width: "100%", height: "100%", position: "relative" }}>
       {price && (
@@ -526,7 +530,7 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
           </span>
           {change !== null && (
             <span style={{ fontSize: 12, fontFamily: "monospace", color: isUp ? COLORS.green : COLORS.red }}>
-              {isUp ? "▲" : "▼"} {Math.abs(change)}%
+              {isUp ? "▲" : "▼"} {Math.abs(change).toFixed(2)}%
             </span>
           )}
           <span style={{ fontSize: 10, color: COLORS.muted }}>BINANCE · LIVE</span>
@@ -592,7 +596,7 @@ function BinanceChart({ symbol, interval = "1h", news = [] }) {
 }
 
 function FearGreedGauge() {
-  const [data, setData] = useState(null);
+  const [data, setData] = useState<FearGreed | null>(null);
 
   useEffect(() => {
     const fetch_ = async () => {
@@ -707,8 +711,8 @@ function NavItem({ icon, label, active, onClick }) {
 // INLINE AI EXPLANATION PANEL  (right column of dashboard)
 // ══════════════════════════════════════════════════════════════════
 function ExplainPanel({ selectedNews: item, onClose }) {
-  const [explain, setExplain]       = useState(null);
-  const [explainErr, setExplainErr] = useState(null);
+  const [explain, setExplain]       = useState<ExplainResponse | null>(null);
+  const [explainErr, setExplainErr] = useState<string | null>(null);
   const [loading, setLoading]       = useState(false);
 
   // Auto-fetch when item changes
@@ -867,7 +871,7 @@ function ExplainPanel({ selectedNews: item, onClose }) {
                   ? explain.steps.map((step, i) => (
                     <div key={i} style={{
                       fontSize: 11, color: COLORS.text, lineHeight: 1.65, padding: "5px 0",
-                      borderBottom: i < explain.steps.length - 1 ? `1px solid ${COLORS.border}` : "none",
+                      borderBottom: i < (explain.steps?.length ?? 0) - 1 ? `1px solid ${COLORS.border}` : "none",
                     }}>
                       {step}
                     </div>
@@ -917,9 +921,9 @@ function NewsModal({ item, onClose }) {
   const colors  = { Bullish: COLORS.green, Bearish: COLORS.red, Neutral: COLORS.muted };
   const color   = colors[label];
 
-  const [explain, setExplain]       = useState(null);
-  const [explainErr, setExplainErr] = useState(null);
-  const [similar, setSimilar]       = useState(item.similar || []);
+  const [explain, setExplain]       = useState<ExplainResponse | "loading" | null>(null);
+  const [explainErr, setExplainErr] = useState<string | null>(null);
+  const [similar, setSimilar]       = useState<SimilarNews[]>(item.similar || []);
   const [simLoading, setSimLoading] = useState(false);
 
   const score   = Math.abs(item.model_score || 0);
@@ -1084,7 +1088,7 @@ function NewsModal({ item, onClose }) {
                   <div key={i} style={{
                     fontSize: 12, color: COLORS.text, lineHeight: 1.6,
                     padding: "6px 0",
-                    borderBottom: i < explain.steps.length - 1 ? `1px solid ${COLORS.border}` : "none",
+                    borderBottom: i < (explain.steps?.length ?? 0) - 1 ? `1px solid ${COLORS.border}` : "none",
                   }}>
                     {step}
                   </div>
@@ -1286,7 +1290,7 @@ function ConnectionDot({ connected }) {
 }
 
 // ── Training Data Analysis ─────────────────────────────────────────
-function MetricCard({ label, value, sub, color }) {
+function MetricCard({ label, value, sub = undefined, color }: { label: string; value: string | number; sub?: string; color?: string }) {
   return (
     <div style={{ background: COLORS.panel, borderRadius: 10, padding: "14px 16px", border: `1px solid ${COLORS.border2}` }}>
       <div style={{ fontSize: 10, color: COLORS.muted, letterSpacing: 1, marginBottom: 6 }}>{label.toUpperCase()}</div>
@@ -1341,9 +1345,9 @@ function ConfusionMatrix({ cm, label }) {
 }
 
 function TrainingAnalysis() {
-  const [data, setData] = useState(null);
+  const [data, setData] = useState<Record<string, any> | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch(`${API_BASE}/training/stats`)
@@ -1369,9 +1373,9 @@ function TrainingAnalysis() {
   const m1h = mp["1_hour"] || {};
   const dir = mp["direction"] || {};
 
-  const sentMax = Math.max(...Object.values(td.sentiment_counts || {}), 1);
-  const typeMax = Math.max(...Object.values(td.news_types || {}), 1);
-  const chMax   = Math.max(...Object.values(td.channels || {}), 1);
+  const sentMax = Math.max(...(Object.values(td.sentiment_counts || {}) as number[]), 1);
+  const typeMax = Math.max(...(Object.values(td.news_types || {}) as number[]), 1);
+  const chMax   = Math.max(...(Object.values(td.channels || {}) as number[]), 1);
   const histMax = Math.max(...(td.btc_change_histogram || []).map(b => b.count), 1);
 
   const perfColor = (v, good) => v >= good ? COLORS.green : v >= good * 0.8 ? COLORS.gold : COLORS.red;
@@ -1600,9 +1604,9 @@ function MiniBar({ label, value, max, color }) {
 
 function CustomAnalyzer() {
   const [title, setTitle]   = useState("");
-  const [result, setResult] = useState(null);
+  const [result, setResult] = useState<Record<string, any> | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError]   = useState(null);
+  const [error, setError]   = useState<string | null>(null);
 
   const run = async () => {
     if (!title.trim()) return;
@@ -1789,7 +1793,7 @@ function CustomAnalyzer() {
 }
 
 function ModelAnalysis() {
-  const [stats, setStats] = useState(null);
+  const [stats, setStats] = useState<Record<string, any> | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -1890,7 +1894,7 @@ const NEWS_TYPE_ICONS = {
 
 function ChannelAnalysisPage() {
   const [sortBy, setSortBy] = useState("count");
-  const [fullStats, setFullStats] = useState(null);
+  const [fullStats, setFullStats] = useState<Record<string, any> | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
 
   useEffect(() => {
@@ -2167,16 +2171,16 @@ export default function CryptoDashboard() {
   const [selectedSymbol, setSelectedSymbol] = useState("BTCUSDT");
   const [chartInterval, setChartInterval] = useState("15m");
   const [time, setTime]                   = useState(new Date());
-  const [allNews, setAllNews]             = useState([]);
-  const [hotSignals, setHotSignals]       = useState([]);
-  const [selectedNews, setSelectedNews]   = useState(null);
+  const [allNews, setAllNews]             = useState<NewsItem[]>([]);
+  const [hotSignals, setHotSignals]       = useState<NewsItem[]>([]);
+  const [selectedNews, setSelectedNews]   = useState<NewsItem | null>(null);
   const [newsH, setNewsH]                 = useState(280);
   const newsDragRef                        = useRef({ dragging: false, startY: 0, startH: 0 });
 
   // Calendar state
-  const [calendarDate, setCalendarDate]   = useState(null);  // null = today
-  const [dbDatesApi, setDbDatesApi]       = useState([]);
-  const [dateNews, setDateNews]           = useState([]);
+  const [calendarDate, setCalendarDate]   = useState<Date | null>(null);
+  const [dbDatesApi, setDbDatesApi]       = useState<string[]>([]);
+  const [dateNews, setDateNews]           = useState<NewsItem[]>([]);
   const [dateLoading, setDateLoading]     = useState(false);
 
   // Clock
@@ -2250,7 +2254,7 @@ export default function CryptoDashboard() {
     const localDates = allNews.map(n => {
       const d = newsDate(n);
       return d ? dateKey(d) : null;
-    }).filter(Boolean);
+    }).filter((x): x is string => x !== null);
     return [...new Set([...dbDatesApi, ...localDates])].sort();
   }, [dbDatesApi, allNews]);
 
@@ -2286,7 +2290,7 @@ export default function CryptoDashboard() {
     // build list of distinct dates newest-first
     const sorted = [...unique].sort((a, b) => (b.published_ts || b.received_at || 0) - (a.published_ts || a.received_at || 0));
     const dateSeen = new Set();
-    const orderedDates = [];
+    const orderedDates: string[] = [];
     for (const n of sorted) {
       const ts = n.published_ts || n.received_at;
       if (!ts) continue;

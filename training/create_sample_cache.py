@@ -111,7 +111,7 @@ def _build_sentiment(cb_probs: np.ndarray) -> dict:
 
 
 def _build_features(cb_emb, fb_emb, sent: dict, pub_dt: datetime) -> np.ndarray:
-    from training.xgboost_v9 import crypto_news_type_classify
+    from training.xgboost_train_bert import crypto_news_type_classify
     type_probs = crypto_news_type_classify(cb_emb.reshape(1, -1))[0]
 
     sent_vec = np.array([
@@ -164,14 +164,14 @@ def _query_rag(title: str, published_ts: int) -> np.ndarray:
 
 def _load_xgb():
     import pickle, xgboost as xgb
-    clf15 = xgb.XGBClassifier(); clf15.load_model(str(ROOT / "xgboost_v9_clf15m.json"))
-    clf1h = xgb.XGBClassifier(); clf1h.load_model(str(ROOT / "xgboost_v9_clf1h.json"))
-    with open(ROOT / "xgboost_v9_scaler.pkl", "rb") as f:
+    clf15 = xgb.XGBClassifier(); clf15.load_model(str(ROOT / "xgb_impact_clf_15m_bert.json"))
+    clf1h = xgb.XGBClassifier(); clf1h.load_model(str(ROOT / "xgb_impact_clf_1h_bert.json"))
+    with open(ROOT / "xgb_feature_scaler_bert.pkl", "rb") as f:
         import pickle
         scaler = pickle.load(f)
 
     thr15, thr1h = 0.295, 0.265
-    res_path = ROOT / "xgboost_v9_results.json"
+    res_path = ROOT / "xgb_bert_results.json"
     if res_path.exists():
         res = json.loads(res_path.read_text())
         thr15 = res.get("threshold_15m", thr15)

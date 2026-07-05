@@ -9,6 +9,7 @@ Usage:
 """
 
 import asyncio
+import bisect
 import hashlib
 import json
 import pickle
@@ -27,14 +28,31 @@ import xgboost as xgb
 warnings.filterwarnings("ignore")
 
 HERE       = Path(__file__).parent
-sys.path.insert(0, str(HERE))
+ROOT       = HERE.parent
+sys.path.insert(0, str(ROOT))
 
-CACHE_FILE = HERE / "news_cache.json"
-CSV_PATH   = HERE / "news_cleaned_filtered_scored.csv"
+CACHE_FILE = ROOT / "storage" / "news_cache.json"
+CSV_PATH   = ROOT / "news_cleaned_filtered_scored.csv"
 ETH_CACHE  = HERE / "eth_15m_klines.csv"
 BTC_CACHE  = HERE / "btc_15m_klines.csv"
 
-FETCH_FROM = datetime.now(timezone.utc) - __import__("datetime").timedelta(days=3)
+def _default_fetch_from() -> "datetime":
+    """Start from the last published date in the CSV minus 1 day (overlap buffer),
+    or fall back to 7 days ago if CSV is missing or unparseable."""
+    import datetime as _dt
+    fallback = datetime.now(timezone.utc) - _dt.timedelta(days=7)
+    if not CSV_PATH.exists():
+        return fallback
+    try:
+        last = pd.read_csv(CSV_PATH, usecols=["published"], low_memory=False)["published"].dropna()
+        ts = pd.to_datetime(last, utc=True, errors="coerce").max()
+        if pd.isna(ts):
+            return fallback
+        return (ts - _dt.timedelta(days=1)).to_pydatetime().replace(tzinfo=timezone.utc)
+    except Exception:
+        return fallback
+
+FETCH_FROM = _default_fetch_from()
 
 CHANNELS = [
     "the_block_crypto",
@@ -88,7 +106,7 @@ async def fetch_all_channels():
     from telethon import TelegramClient
     from config import TELEGRAM_API_ID, TELEGRAM_API_HASH
 
-    client = TelegramClient(str(HERE / "telegram_session"),
+    client = TelegramClient(str(ROOT / "telegram_session"),
                             TELEGRAM_API_ID, TELEGRAM_API_HASH)
     await client.start()
     print("  ✅ Telegram connected")
@@ -209,8 +227,9 @@ def batch_bert(titles: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 # ── 3. Build XGBoost v9 features ─────────────────────────────────
 
-def build_features(msgs, cb_emb, fb_emb, cb_probs, fb_probs, rb_probs) -> np.ndarray:
-    from xgboost_v9 import crypto_news_type_classify, NEWS_TYPE_LABELS
+def build_features(msgs, cb_emb, fb_emb, cb_probs, fb_probs, rb_probs,
+                   btc_map: dict | None = None) -> np.ndarray:
+    from training.xgboost_train_bert import crypto_news_type_classify, NEWS_TYPE_LABELS
 
     n = len(msgs)
 
@@ -244,40 +263,59 @@ def build_features(msgs, cb_emb, fb_emb, cb_probs, fb_probs, rb_probs) -> np.nda
     # News-type probs (11)
     type_probs = crypto_news_type_classify(cb_emb)
 
-    # Macro timing (8): 5 timing + 3 price context (zeros for live)
+    # Macro timing (8): 5 timing + 3 price context
     h   = np.array([m["pub_dt"].hour     for m in msgs], dtype=np.float32)
     dow = np.array([m["pub_dt"].weekday() for m in msgs], dtype=np.float32)
     fomc = np.array([int(m["pub_dt"].date() in _FOMC_SET) for m in msgs], dtype=np.float32)
 
-    # Price context: btc_vol (rolling std of returns), btc_mom (rolling mean), fear_greed
-    # These match xgboost_v9 training's compute_price_context function
-    # For batch historical scoring, we approximate using the available price data
-    # TODO: compute actual rolling vol/mom from kline data for full parity
+    # Price context: btc_vol (rolling std over 20 candles), btc_mom (rolling mean over 5),
+    # fear_greed. Compute from kline data when available to match training's
+    # compute_price_context(); fall back to zeros only when klines weren't fetched.
+    if btc_map:
+        sorted_times  = sorted(btc_map.keys())
+        sorted_prices = [btc_map[t] for t in sorted_times]
+        btc_vol_arr   = np.zeros(n, dtype=np.float32)
+        btc_mom_arr   = np.zeros(n, dtype=np.float32)
+        for i, msg in enumerate(msgs):
+            candle = (int(msg["pub_dt"].timestamp() * 1000) // INTERVAL_MS) * INTERVAL_MS
+            idx = bisect.bisect_right(sorted_times, candle) - 1
+            if idx >= 2:
+                start  = max(0, idx - 20)
+                prices = sorted_prices[start: idx + 1]
+                if len(prices) >= 2:
+                    rets = [(prices[j] - prices[j - 1]) / prices[j - 1]
+                            for j in range(1, len(prices)) if prices[j - 1]]
+                    if rets:
+                        btc_vol_arr[i] = float(np.std(rets))
+                        btc_mom_arr[i] = float(np.mean(rets[-5:])) if len(rets) >= 5 else float(np.mean(rets))
+    else:
+        btc_vol_arr = np.zeros(n, dtype=np.float32)
+        btc_mom_arr = np.zeros(n, dtype=np.float32)
+
     macro = np.column_stack([
-        (dow >= 5).astype(np.float32),          # weekend
-        ((h >= 2) & (h <= 6)).astype(np.float32),   # low liq
-        ((h >= 13) & (h <= 21)).astype(np.float32),  # us hours
-        ((h >= 0) & (h <= 8)).astype(np.float32),    # asia
+        (dow >= 5).astype(np.float32),
+        ((h >= 2) & (h <= 6)).astype(np.float32),
+        ((h >= 13) & (h <= 21)).astype(np.float32),
+        ((h >= 0) & (h <= 8)).astype(np.float32),
         fomc,
-        np.zeros(n), np.zeros(n), np.full(n, 0.5),  # btc_vol, btc_mom, fear_greed=0.5 neutral
+        btc_vol_arr, btc_mom_arr, np.full(n, 0.5),  # fear_greed neutral fallback
     ]).astype(np.float32)           # 8 dims
 
-    # RAG = zeros (10 dims) — RAG features require Qdrant query per item
-    # For batch scoring this is a known approximation
-    rag = np.zeros((n, 10), dtype=np.float32)
+    # RAG = zero dummy (1 dim) — model was trained with --skip-rag; must match
+    rag = np.zeros((n, 1), dtype=np.float32)
 
-    # 768+768+13+11+8+10 = 1578
+    # 768+768+13+11+8+1 = 1569
     return np.hstack([cb_emb, fb_emb, sent_arr, type_probs, macro, rag]).astype(np.float32)
 
 
 # ── 4. Load XGBoost v9 and score ─────────────────────────────────
 
 def load_xgb_v9():
-    clf15 = xgb.XGBClassifier(); clf15.load_model(str(HERE / "xgboost_v9_clf15m.json"))
-    clf1h = xgb.XGBClassifier(); clf1h.load_model(str(HERE / "xgboost_v9_clf1h.json"))
-    with open(HERE / "xgboost_v9_scaler.pkl", "rb") as f:
+    clf15 = xgb.XGBClassifier(); clf15.load_model(str(ROOT / "xgb_impact_clf_15m_bert.json"))
+    clf1h = xgb.XGBClassifier(); clf1h.load_model(str(ROOT / "xgb_impact_clf_1h_bert.json"))
+    with open(ROOT / "xgb_feature_scaler_bert.pkl", "rb") as f:
         scaler = pickle.load(f)
-    res = json.loads((HERE / "xgboost_v9_results.json").read_text())
+    res = json.loads((ROOT / "xgb_bert_results.json").read_text())
     thr15 = res.get("threshold_15m", 0.295)
     thr1h  = res.get("threshold_1h",  0.265)
     print(f"  XGBoost v9 loaded  thresh15={thr15:.3f}  thresh1h={thr1h:.3f}")
@@ -342,8 +380,6 @@ def to_cache_items(msgs, cb_probs, p15, p1h, thr15, thr1h):
     for i, msg in enumerate(msgs):
         prob15 = float(p15[i])
         prob1h = float(p1h[i])
-        if max(prob15, prob1h) < 0.35:
-            continue
 
         p_neg, p_neu, p_pos = float(cb_probs[i,0]), float(cb_probs[i,1]), float(cb_probs[i,2])
         net   = p_pos - p_neg
@@ -434,9 +470,9 @@ def to_training_rows(msgs, cb_probs, fb_probs, rb_probs, btc_map, eth_map):
             "sentiment_score":    round(net, 4),
             "weight":             max(5, min(9, round(conf * 10))),
             "confidence":         conf,
-            "prob_positive":      round(p_pos, 4),
-            "prob_negative":      round(p_neg, 4),
-            "prob_neutral":       round(p_neu, 4),
+            "prob_positive":      round(avg_pos, 4),
+            "prob_negative":      round(avg_neg, 4),
+            "prob_neutral":       round(avg_neu, 4),
             "news_type":          np.nan,
             "fomc_week":          fomc,
             "is_weekend":         int(dow >= 5),
@@ -502,25 +538,26 @@ async def main():
     titles = [m["title"] for m in msgs]
     cb_emb, fb_emb, cb_probs, fb_probs, rb_probs = batch_bert(titles)
 
-    # 3. Features
-    print("\n[3/7] Building XGBoost v9 features...")
-    X = build_features(msgs, cb_emb, fb_emb, cb_probs, fb_probs, rb_probs)
+    # 3. Fetch BTC+ETH prices (before features so rolling vol/mom are real values)
+    print("\n[3/7] Fetching BTC + ETH klines for price context and labels...")
+    ts_list  = [int(m["pub_dt"].timestamp()) * 1000 for m in msgs]
+    # Extra lookback for rolling vol/mom (20 candles × 15m = 5h before earliest msg)
+    start_ms = min(ts_list) - 20 * INTERVAL_MS
+    end_ms   = max(ts_list) + 4 * INTERVAL_MS
+    btc_map  = fetch_klines("BTCUSDT", start_ms, end_ms, BTC_CACHE)
+    eth_map  = fetch_klines("ETHUSDT", start_ms, end_ms, ETH_CACHE)
+
+    # 4. Features — pass btc_map so rolling vol/mom match training's compute_price_context
+    print("\n[4/7] Building XGBoost v9 features...")
+    X = build_features(msgs, cb_emb, fb_emb, cb_probs, fb_probs, rb_probs, btc_map=btc_map)
     print(f"  Feature matrix: {X.shape}")
 
-    # 4. Score
-    print("\n[4/7] Loading XGBoost v9 and scoring...")
+    # 5. Score
+    print("\n[5/7] Loading XGBoost v9 and scoring...")
     clf15, clf1h, scaler, thr15, thr1h = load_xgb_v9()
     p15, p1h = run_xgb(X, clf15, clf1h, scaler)
     print(f"  Mean prob 15m: {p15.mean():.3f}  1h: {p1h.mean():.3f}")
     print(f"  Items >= thresh: 15m={int((p15>=thr15).sum())}  1h={int((p1h>=thr1h).sum())}")
-
-    # 5. Fetch BTC+ETH prices
-    print("\n[5/7] Fetching BTC + ETH klines for price labels...")
-    ts_list  = [int(m["pub_dt"].timestamp()) * 1000 for m in msgs]
-    start_ms = min(ts_list) - INTERVAL_MS
-    end_ms   = max(ts_list) + 4 * INTERVAL_MS
-    btc_map  = fetch_klines("BTCUSDT", start_ms, end_ms, BTC_CACHE)
-    eth_map  = fetch_klines("ETHUSDT", start_ms, end_ms, ETH_CACHE)
 
     # 6. Write to training CSV
     print("\n[6/7] Appending to training CSV...")
@@ -565,7 +602,7 @@ async def main():
         "metadata": {
             "total_items":  len(merged_cache),
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "model":        "xgboost_v9",
+            "model":        "xgboost_bert",
             "fetch_from":   FETCH_FROM.isoformat(),
         },
         "news": merged_cache,
@@ -580,4 +617,12 @@ async def main():
 
 
 if __name__ == "__main__":
+    import argparse as _ap
+    _parser = _ap.ArgumentParser()
+    _parser.add_argument("--from-date", default=None,
+                         help="Override start date, e.g. 2026-05-01")
+    _args = _parser.parse_args()
+    if _args.from_date:
+        FETCH_FROM = datetime.fromisoformat(_args.from_date).replace(tzinfo=timezone.utc)
+        print(f"  [override] FETCH_FROM → {FETCH_FROM.date()}")
     asyncio.run(main())

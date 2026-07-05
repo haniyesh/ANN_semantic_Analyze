@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main, v2]
+
+jobs:
+  lint-and-test:
+    name: Ruff + Pytest
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # ── Lightweight CI deps (no torch/transformers — those need GPU hours) ──
+      - name: Install CI dependencies
+        run: |
+          pip install --upgrade pip
+          pip install ruff pytest pytest-asyncio httpx anyio
+          pip install \
+            fastapi uvicorn pydantic \
+            pandas numpy scikit-learn xgboost \
+            python-dotenv aiohttp
+
+      # ── Lint ─────────────────────────────────────────────────────────────────
+      - name: Ruff lint
+        run: ruff check . --output-format=github
+
+      # ── Tests (skip anything that needs torch / Telethon / Qdrant) ───────────
+      - name: Run tests
+        env:
+          LOG_LEVEL: WARNING
+          # No real secrets in CI — tests mock everything that needs them
+          INGEST_API_KEY: ci-test-key-not-real
+        run: |
+          pytest tests/ \
+            --ignore=tests/test_dataset_quality.py \
+            -v --tb=short -x \
+            -m "not slow and not requires_models"

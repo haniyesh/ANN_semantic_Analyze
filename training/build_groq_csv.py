@@ -163,8 +163,13 @@ def build_csv(cache: dict):
     cached_count = sum(1 for l in labels if l is not None)
     print(f"  Coverage: {cached_count:,}/{len(df):,} ({cached_count/len(df)*100:.1f}%)")
 
-    df["groq_sentiment"] = [l if l else df.iloc[i].get("sentiment", "neutral")
-                            for i, l in enumerate(labels)]
+    # IMPORTANT: rows without a Groq label stay EMPTY (NaN) — do NOT backfill
+    # with BERT sentiment, that would contaminate the BERT-vs-Groq comparison.
+    # Downstream (build_groq_features) counts and warns about empty labels.
+    df["groq_sentiment"] = labels
+    if cached_count < len(df):
+        print(f"  ⚠️  {len(df) - cached_count:,} rows have no Groq label (left empty).")
+        print(f"      Run again (optionally with --limit N) until coverage is 100%.")
     df["groq_prob_pos"]  = (df["groq_sentiment"] == "positive").astype(float)
     df["groq_prob_neg"]  = (df["groq_sentiment"] == "negative").astype(float)
     df["groq_prob_neu"]  = (df["groq_sentiment"] == "neutral").astype(float)
@@ -221,8 +226,8 @@ def main():
 
     print("\n  Next steps:")
     print("  - Re-run with --limit N to fetch more labels incrementally")
-    print("  - Once coverage > 50%, train: python training/xgboost_v10_groq.py")
-    print("    (update CSV_PATH in xgboost_v10_groq.py to news_cleaned_filtered_scored_groq.csv)")
+    print("  - Once coverage > 50%, train: python training/xgboost_train_groq.py")
+    print("    (update CSV_PATH in xgboost_train_groq.py to news_cleaned_filtered_scored_groq.csv)")
 
 
 if __name__ == "__main__":

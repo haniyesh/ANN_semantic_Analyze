@@ -159,33 +159,7 @@ def _score_to_cols(prob_pos: float, prob_neg: float, prob_neu: float) -> dict:
     }
 
 
-def _ensemble_columns(cb, fb, rb) -> dict:
-    """Compute the 3-model ensemble feature columns the XGBoost model expects.
-
-    This MUST match main.py Step 1b exactly so that training data and live
-    inference share the same sentiment feature semantics (train/serve parity).
-    `cb`, `fb`, `rb` are each (pos, neg, neu) tuples.
-    """
-    cb_pos, cb_neg, cb_neu = cb
-    fb_pos, fb_neg, fb_neu = fb
-    rb_pos, rb_neg, rb_neu = rb
-
-    avg_pos = (cb_pos + fb_pos + rb_pos) / 3
-    avg_neg = (cb_neg + fb_neg + rb_neg) / 3
-    avg_neu = (cb_neu + fb_neu + rb_neu) / 3
-
-    nets = [cb_pos - cb_neg, fb_pos - fb_neg, rb_pos - rb_neg]
-    mean_net = sum(nets) / 3
-    signs = [1 if n > 0 else (-1 if n < 0 else 0) for n in nets]
-    agreement = 1.0 if len(set(signs)) == 1 else 0.5
-
-    return {
-        "cb_prob_pos": round(cb_pos, 4), "cb_prob_neg": round(cb_neg, 4), "cb_prob_neu": round(cb_neu, 4),
-        "fb_prob_pos": round(fb_pos, 4), "fb_prob_neg": round(fb_neg, 4), "fb_prob_neu": round(fb_neu, 4),
-        "rb_prob_pos": round(rb_pos, 4), "rb_prob_neg": round(rb_neg, 4), "rb_prob_neu": round(rb_neu, 4),
-        "net_agreement": round(mean_net * agreement, 4),
-        "_avg": (avg_pos, avg_neg, avg_neu),
-    }
+from services.ensemble import ensemble_probs as _ensemble_columns, FB_PROMPT, RB_PROMPT
 
 
 def score_batch(titles: list[str], m: dict, ensemble: bool = True) -> list[dict]:
@@ -218,13 +192,13 @@ def score_batch(titles: list[str], m: dict, ensemble: bool = True) -> list[dict]
         # Always run FinBERT + RoBERTa so we can emit the ensemble columns.
         try:
             fb = {s["label"].lower(): s["score"]
-                  for s in m["fb"](f"Bitcoin crypto market: {title}", truncation=True)[0]}
+                  for s in m["fb"](FB_PROMPT.format(title=title), truncation=True)[0]}
             fb_pos, fb_neg, fb_neu = fb.get("positive", cb_pos), fb.get("negative", cb_neg), fb.get("neutral", cb_neu)
         except Exception:
             fb_pos, fb_neg, fb_neu = cb_pos, cb_neg, cb_neu
         try:
             rb = {s["label"].lower(): s["score"]
-                  for s in m["rb"](f"BREAKING: {title} #Bitcoin #Crypto", truncation=True)[0]}
+                  for s in m["rb"](RB_PROMPT.format(title=title), truncation=True)[0]}
             rb_pos, rb_neg, rb_neu = rb.get("positive", cb_pos), rb.get("negative", cb_neg), rb.get("neutral", cb_neu)
         except Exception:
             rb_pos, rb_neg, rb_neu = cb_pos, cb_neg, cb_neu

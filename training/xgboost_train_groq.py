@@ -1,29 +1,33 @@
 """
-XGBoost v10 — Groq/Llama-3.3-70B Sentiment
-============================================
-Same as xgboost_v9.py but replaces the 3-BERT ensemble sentiment features
+XGBoost Trainer — Groq/Llama-3.3-70B Sentiment
+================================================
+Same as xgboost_train_bert.py but replaces the 3-BERT ensemble sentiment features
 with Groq/Llama-3.3-70B predictions, to compare LLM sentiment vs BERT.
 
 Sentiment features replaced:
-  v9  : cb_prob_{pos/neg/neu}, fb_prob_{pos/neg/neu}, rb_prob_{pos/neg/neu}, net_agreement (10 dims)
-  v10 : groq_pos, groq_neg, groq_neu  (3 dims, one-hot from LLM label)
+  BERT : cb_prob_{pos/neg/neu}, fb_prob_{pos/neg/neu}, rb_prob_{pos/neg/neu}, net_agreement (10 dims)
+  Groq : groq_pos, groq_neg, groq_neu  (3 dims, one-hot from LLM label)
 
 Everything else is identical: dual BERT embeddings, price context, RAG, thresholds.
 
 Usage:
-    python xgboost_v10_groq.py                        # train + evaluate (compute Groq if needed)
-    python xgboost_v10_groq.py --skip-rag             # faster debug
-    python xgboost_v10_groq.py --compare              # show v9 vs v10 table
-    python xgboost_v10_groq.py --groq-sample 5000     # only call Groq for first N rows
-    python xgboost_v10_groq.py --groq-limit 1000      # limit new Groq API calls per run
+    python xgboost_train_groq.py                        # train + evaluate (compute Groq if needed)
+    python xgboost_train_groq.py --skip-rag             # faster debug
+    python xgboost_train_groq.py --compare              # show BERT vs Groq table
+    python xgboost_train_groq.py --groq-sample 5000     # only call Groq for first N rows
+    python xgboost_train_groq.py --groq-limit 1000      # limit new Groq API calls per run
 """
 
-import os, json, time, hashlib, warnings, argparse
+import os, sys, json, time, hashlib, warnings, argparse
 from pathlib import Path
 import numpy as np
 import pandas as pd
 
 warnings.filterwarnings("ignore")
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))              # pipeline.*
+sys.path.insert(0, str(ROOT / "training"))   # sibling training scripts
 
 import torch
 import torch.nn.functional as F
@@ -41,17 +45,17 @@ load_dotenv()
 # ══════════════════════════════════════════════════════════════════
 HERE             = Path(__file__).parent.parent
 SENTIMENT_CSV    = HERE / "news_cleaned_filtered_scored.csv"
-CRYPTOBERT_CACHE = HERE / "cryptobert_v8_pipeline.npy"
-FINBERT_CACHE    = HERE / "finbert_v9_pipeline.npy"
+CRYPTOBERT_CACHE = HERE / "cryptobert_embeddings_cache.npy"
+FINBERT_CACHE    = HERE / "finbert_embeddings_cache.npy"
 FEAR_GREED_CACHE = HERE / "fear_greed_cache.json"
 GROQ_CACHE       = HERE / "groq_sentiment_cache.json"
 
 FINBERT_MODEL    = "ProsusAI/finbert"
 DUAL_EMB_DIM     = 768 + 768
 
-XGB_MODEL_BASE   = HERE / "xgboost_v10_groq"
-XGB_RESULTS_PATH = HERE / "xgboost_v10_groq_results.json"
-V9_RESULTS_PATH  = HERE / "xgboost_v9_results.json"
+XGB_MODEL_BASE   = HERE / "xgb_groq"      # prefix for Groq-variant model artifacts
+XGB_RESULTS_PATH = HERE / "xgb_groq_results.json"
+V9_RESULTS_PATH  = HERE / "xgb_bert_results.json"
 
 THRESHOLD_15M = 0.3
 THRESHOLD_1H  = 0.5
@@ -210,22 +214,54 @@ def compute_groq_sentiment(titles: list[str], groq_limit: int = None) -> dict:
     return cache
 
 
+GROQ_CSV = HERE / "news_cleaned_filtered_scored_groq.csv"
+
+
 def build_groq_features(df: pd.DataFrame, groq_limit: int = None) -> np.ndarray:
     """
     Returns (N, 3) array: [groq_pos, groq_neg, groq_neu] one-hot features.
-    Titles missing from cache get 'neutral'.
+
+    Label sources, in priority order:
+      1. news_cleaned_filtered_scored_groq.csv (groq_sentiment column,
+         matched by title) — the authoritative scored file
+      2. groq_sentiment_cache.json (md5-keyed cache; may trigger API calls)
+      3. 'neutral' fallback — counted and WARNED, because build_groq_csv.py
+         backfills uncached rows with BERT sentiment, which would contaminate
+         the BERT-vs-Groq comparison if unnoticed.
     """
     titles = df["title"].fillna("").tolist()
-    cache  = compute_groq_sentiment(titles, groq_limit=groq_limit)
 
+    csv_map = {}
+    if GROQ_CSV.exists():
+        gdf = pd.read_csv(GROQ_CSV, low_memory=False,
+                          usecols=["title", "groq_sentiment"])
+        csv_map = dict(zip(gdf["title"].fillna(""), gdf["groq_sentiment"]))
+        print(f"  Groq labels from {GROQ_CSV.name}: {len(csv_map):,} titles")
+
+    missing_from_csv = [t for t in titles if t not in csv_map]
+    cache = {}
+    if missing_from_csv:
+        cache = compute_groq_sentiment(missing_from_csv, groq_limit=groq_limit)
+
+    n_fallback = 0
     feats = []
     for title in titles:
-        label = cache.get(_title_key(title), "neutral")
+        label = csv_map.get(title)
+        if label is None or (isinstance(label, float) and np.isnan(label)):
+            label = cache.get(_title_key(title))
+        if label not in ("positive", "negative", "neutral"):
+            label = "neutral"
+            n_fallback += 1
         feats.append([
             1.0 if label == "positive" else 0.0,
             1.0 if label == "negative" else 0.0,
             1.0 if label == "neutral"  else 0.0,
         ])
+
+    if n_fallback:
+        print(f"  ⚠️  {n_fallback:,}/{len(titles):,} titles have NO Groq label "
+              f"(defaulted to neutral). For a clean BERT-vs-Groq comparison, "
+              f"run training/build_groq_csv.py until coverage is 100%.")
 
     arr = np.array(feats, dtype=np.float32)
     pos_pct = arr[:, 0].mean() * 100
@@ -573,7 +609,7 @@ def eval_horizon(label, probs, threshold, y_cls, reg_pred, y_reg):
 # ══════════════════════════════════════════════════════════════════
 def print_comparison(v10_results: dict):
     if not V9_RESULTS_PATH.exists():
-        print(f"\n  ⚠ v9 results not found at {V9_RESULTS_PATH} — run xgboost_v9.py first")
+        print(f"\n  ⚠ BERT results not found at {V9_RESULTS_PATH} — run xgboost_train_bert.py first")
         return
 
     with open(V9_RESULTS_PATH) as f:
@@ -673,10 +709,10 @@ def main():
     X_vl   = scaler.transform(X[vi]).astype(np.float32)
     X_te   = scaler.transform(X[te_idx]).astype(np.float32)
 
-    clf15_path  = str(XGB_MODEL_BASE) + "_clf15m.json"
-    clf1h_path  = str(XGB_MODEL_BASE) + "_clf1h.json"
-    reg15_path  = str(XGB_MODEL_BASE) + "_reg15m.json"
-    scaler_path = str(XGB_MODEL_BASE) + "_scaler.pkl"
+    clf15_path  = str(HERE / "xgb_impact_clf_15m_groq.json")
+    clf1h_path  = str(HERE / "xgb_impact_clf_1h_groq.json")
+    reg15_path  = str(HERE / "xgb_price_reg_15m_groq.json")
+    scaler_path = str(HERE / "xgb_feature_scaler_groq.pkl")
 
     if args.load_only and Path(clf15_path).exists():
         import xgboost as xgb
@@ -712,6 +748,19 @@ def main():
     p1h_te   = clf_1h.predict_proba(X_te)[:, 1]
     r15_te   = reg_15m.predict(X_te)
     dir_pred = (p15_te >= 0.5).astype(int)
+
+    # Save per-row test predictions for bootstrap CIs / paired significance
+    # tests (used by training/compare_matrix.py).
+    preds_path = str(XGB_MODEL_BASE) + "_test_preds.npz"
+    np.savez(
+        preds_path,
+        p15=p15_te, p1h=p1h_te, r15=r15_te,
+        y_c15=y_c15[te_idx], y_c1h=y_c1h[te_idx],
+        y_r15=y_r15[te_idx], y_r1h=y_r1h[te_idx],
+        thr_15m=thr_15m, thr_1h=thr_1h,
+        published=df["published"].iloc[te_idx].astype("int64").values,
+    )
+    print(f"  Test predictions saved → {preds_path}")
 
     r15 = eval_horizon("15-minute", p15_te, thr_15m, y_c15[te_idx], r15_te, y_r15[te_idx])
     r1h = eval_horizon("1-hour",    p1h_te, thr_1h,  y_c1h[te_idx], r15_te, y_r1h[te_idx])

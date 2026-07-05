@@ -27,9 +27,6 @@ GROQ_API_KEYS       = [k.strip() for k in os.getenv("GROQ_API_KEYS", os.getenv("
 GROQ_CLASSIFICATION_MODEL = os.getenv("GROQ_CLASSIFICATION_MODEL", "llama-3.1-8b-instant")
 HF_API_KEY          = os.getenv("HF_API_KEY")
 
-# Path to the trained PyTorch model file
-MODEL_PATH          = os.getenv("MODEL_PATH", "production_system_v8.pt")
-
 # ── News scoring thresholds — 4-tier system ───────────────────────────────────
 # Tier    | Score  | Confidence | ~% of data
 # Hot     | ≥0.55  | ≥60%       | ~0.4%
@@ -37,7 +34,6 @@ MODEL_PATH          = os.getenv("MODEL_PATH", "production_system_v8.pt")
 # Show    | ≥0.20  | ≥50%       | ~5%
 # Hidden  | <0.20  | —          | ~95%  (never sent to dashboard)
 DASHBOARD_API        = os.getenv("DASHBOARD_API", "http://localhost:8000")
-MODEL_PATH           = "production_system_v8.pt"
 SCORE_15M_MIN        = 0.0
 SCORE_15M_MAX        = 1.0
 SCORE_1H_MIN         = 0.0
@@ -85,10 +81,6 @@ def news_importance(item: dict) -> dict:
     tier = "Key" if pct >= 70 else ("Notable" if pct >= 55 else "Regular")
     return {"tier": tier, "score": pct}
 
-# ── Cache ─────────────────────────────────────────────────────────────────────
-CACHE_FILE      = "storage/news_cache.json"
-MAX_CACHE_ITEMS = 10_000   # keep only the latest N items
-
 # ── External APIs ─────────────────────────────────────────────────────────────
 BINANCE_API   = os.getenv("BINANCE_API",   "https://api.binance.com/api/v3")
 COINGECKO_API = os.getenv("COINGECKO_API", "https://api.coingecko.com/api/v3")
@@ -100,27 +92,56 @@ API_PORT = int(os.getenv("API_PORT", "8000"))
 # sentiment model
 SENTIMENT_MODEL_NAME = os.getenv("SENTIMENT_MODEL_NAME", "ProsusAI/finbert")
 
-BINANCE_API   = os.getenv("BINANCE_API",   "https://api.binance.com/api/v3")
-COINGECKO_API = os.getenv("COINGECKO_API", "https://api.coingecko.com/api/v3")
 # ── Validation ────────────────────────────────────────────────────────────────
-def validate():
-    """
-    Call this at startup to catch missing required settings early.
-    Raises ValueError if a required key is missing.
-    """
+def validate_bot():
+    """Call at main.py startup to catch missing bot env vars early."""
     required = {
-        "TELEGRAM_BOT_TOKEN":  TELEGRAM_BOT_TOKEN,
-        "TELEGRAM_API_ID":     TELEGRAM_API_ID,
-        "TELEGRAM_API_HASH":   TELEGRAM_API_HASH,
-        "TELEGRAM_SESSION":    TELEGRAM_SESSION,
-        "DATABASE_URL":        DATABASE_URL,
-        "GROQ_API_KEY":        GROQ_API_KEY,
-        "SENTIMENT_MODEL_NAME": SENTIMENT_MODEL_NAME,
+        "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
+        "TELEGRAM_API_ID":    TELEGRAM_API_ID,
+        "TELEGRAM_API_HASH":  TELEGRAM_API_HASH,
+        "TELEGRAM_SESSION":   TELEGRAM_SESSION,
+        "GROQ_API_KEY":       GROQ_API_KEY,
     }
-    missing = [name for name, value in required.items() if not value]
+    missing = [k for k, v in required.items() if not v]
     if missing:
-        raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
-    print("✅ Config loaded successfully")
+        raise ValueError(f"Missing required env vars for bot: {', '.join(missing)}")
+    if not DATABASE_URL:
+        print("⚠️  DB_URL not set — running in cache-only mode (news_cache.json)")
+    print("✅ Bot config OK")
+
+
+def validate_api():
+    """Call at api/server.py startup to catch missing API env vars early."""
+    ingest_key = os.getenv("INGEST_API_KEY", "")
+    if not ingest_key:
+        print("⚠️  INGEST_API_KEY not set — POST /news endpoint will be disabled")
+    print("✅ API config OK")
+
+
+def validate():
+    """Legacy: validates both bot and API vars. Use validate_bot()/validate_api() directly."""
+    validate_bot()
+    validate_api()
+
+
+# ── FOMC calendar ─────────────────────────────────────────────────────────────
+# Fed meeting dates (announcement day).  ±3-day window is treated as fomc_week=1.
+# Update this list when the Fed publishes a new calendar.
+from datetime import date as _date, timedelta as _td
+
+_FOMC_DATES_RAW = [
+    "2025-01-29", "2025-03-19", "2025-05-07", "2025-06-18", "2025-07-30",
+    "2025-09-17", "2025-10-29", "2025-12-10",
+    "2026-01-28", "2026-03-18", "2026-05-06", "2026-06-17",
+    "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09",
+]
+_s: set = set()
+for _raw in _FOMC_DATES_RAW:
+    _center = _date.fromisoformat(_raw)
+    for _off in range(-3, 4):
+        _s.add(_center + _td(days=_off))
+FOMC_WEEK_DATES: frozenset = frozenset(_s)
+del _s, _raw, _center, _off
 
 
 if __name__ == "__main__":
@@ -129,4 +150,4 @@ if __name__ == "__main__":
     validate()
     print(f"  Channels : {TELEGRAM_CHANNELS}")
     print(f"  API Port : {API_PORT}")
-    print(f"  Model    : {MODEL_PATH}")
+    print(f"  Model    : xgb_impact_clf_15m_bert.json / xgb_impact_clf_1h_bert.json")
