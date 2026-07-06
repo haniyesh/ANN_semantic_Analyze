@@ -80,18 +80,22 @@ function sentimentLabel(s) {
   if (s === "negative") return "Bearish";
   return "Neutral";
 }
-// Impact badges (coloring only — NOT used for display filtering)
-// Hot ≥0.80, Medium ≥0.55, Show ≥0.30 — must match config.py + api/server.py
-const SCORE_HOT  = 0.80;
-const SCORE_MED  = 0.55;
-const CONF_MIN   = 50;   // minimum confidence to display at all (0–100 units)
+// Display thresholds — defaults match config.py, fetched live from GET /api/config on mount.
+// All filter/badge functions read from _cfg; no threshold values live in this file.
+const _cfg = {
+  scoreHot:         0.80,
+  scoreMed:         0.55,
+  scoreShow:        0.30,
+  confMin:          50,
+  reliableChannels: new Set(["the_block_crypto", "coindesk", "cointelegraph", "WatcherGuru", "google_news"]),
+};
 
 function scoreTier(score15, conf, score1h) {
   const s = Math.max(Math.abs(score15 || 0), Math.abs(score1h || 0));
   const c = conf || 0;
-  if (c < CONF_MIN) return "Hidden";
-  if (s >= SCORE_HOT)  return "Hot";
-  if (s >= SCORE_MED)  return "Medium";
+  if (c < _cfg.confMin)   return "Hidden";
+  if (s >= _cfg.scoreHot) return "Hot";
+  if (s >= _cfg.scoreMed) return "Medium";
   return "Show";
 }
 
@@ -121,8 +125,8 @@ function newsTier(item) {
 
 function signalAction(type, modelScore, modelScore1h) {
   const s = Math.max(Math.abs(modelScore || 0), Math.abs(modelScore1h || 0));
-  if (type === "BUY")  return s >= SCORE_HOT ? "Strong Buy"  : "Buy";
-  if (type === "SELL") return s >= SCORE_HOT ? "Strong Sell" : "Sell";
+  if (type === "BUY")  return s >= _cfg.scoreHot ? "Strong Buy"  : "Buy";
+  if (type === "SELL") return s >= _cfg.scoreHot ? "Strong Sell" : "Sell";
   return "Neutral";
 }
 // Normalize raw model score → 0–1 for items not yet normalized by main.py
@@ -147,20 +151,17 @@ function cleanTitle(title = "") {
     .replace(/`([^`]*)`/g, "$1")     // strip inline code
     .trim();
 }
-const RELIABLE_CHANNELS = new Set(["the_block_crypto", "coindesk", "cointelegraph", "WatcherGuru", "google_news"]);
-
 // Display filter: confidence + reliable channel only (NO score gate — score is for badges, not filtering)
 function passesFilter(n) {
   const conf = n.confidence || 0;
-  return RELIABLE_CHANNELS.has(n.channel)
-    && conf >= CONF_MIN
+  return _cfg.reliableChannels.has(n.channel)
+    && conf >= _cfg.confMin
     && n.sentiment !== "neutral"
     && (n.title || "").trim().length >= 20;
 }
-const SCORE_SHOW = 0.30;  // chart marker threshold — below Medium, above noise
 function passesChartFilter(n) {
   const s = Math.max(Math.abs(n.model_score || 0), Math.abs(n.model_score_1h || 0));
-  return passesFilter(n) && s >= SCORE_SHOW;
+  return passesFilter(n) && s >= _cfg.scoreShow;
 }
 function channelLogo(channel = "") {
   const c = channel.toLowerCase();
@@ -505,7 +506,7 @@ function BinanceChart({ symbol, interval = "1h", news = [] }: { symbol: string; 
     markerNewsRef.current = new Map();
     const newsSignals: any[] = [];
     buckets.forEach((n, bucket) => {
-      const isHot = Math.abs(n.model_score || 0) >= SCORE_HOT;
+      const isHot = Math.abs(n.model_score || 0) >= _cfg.scoreHot;
       const t     = bucket + TZ_OFFSET;
       const pos   = n.sentiment === "positive" ? "belowBar" : "aboveBar";
       const color = n.sentiment === "positive" ? "#22c55e" : "#ef4444";
@@ -1973,7 +1974,7 @@ function ChannelAnalysisPage() {
               </div>
               {/* Avg score */}
               <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                <span style={{ fontSize: 12, fontFamily: "monospace", fontWeight: 700, color: ch.avgScore >= SCORE_HOT ? COLORS.green : ch.avgScore >= SCORE_MED ? COLORS.gold : COLORS.muted }}>
+                <span style={{ fontSize: 12, fontFamily: "monospace", fontWeight: 700, color: ch.avgScore >= _cfg.scoreHot ? COLORS.green : ch.avgScore >= _cfg.scoreMed ? COLORS.gold : COLORS.muted }}>
                   {Math.round(ch.avgScore * 100)}%
                 </span>
                 <PerformanceBar value={ch.avgScore} max={maxScore} color={COLORS.gold} width={60} />
@@ -2186,6 +2187,22 @@ export default function CryptoDashboard() {
   const [dbDatesApi, setDbDatesApi]       = useState<string[]>([]);
   const [dateNews, setDateNews]           = useState<NewsItem[]>([]);
   const [dateLoading, setDateLoading]     = useState(false);
+
+  // Fetch display thresholds — overwrites _cfg defaults so no values are hardcoded here.
+  // Falls back to defaults silently if the API is unreachable.
+  useEffect(() => {
+    fetch(`${API_BASE}/config`)
+      .then(r => r.json())
+      .then(data => {
+        _cfg.scoreHot  = data.score_hot    ?? _cfg.scoreHot;
+        _cfg.scoreMed  = data.score_medium ?? _cfg.scoreMed;
+        _cfg.scoreShow = data.score_show   ?? _cfg.scoreShow;
+        _cfg.confMin   = data.conf_min     ?? _cfg.confMin;
+        if (Array.isArray(data.reliable_channels))
+          _cfg.reliableChannels = new Set(data.reliable_channels);
+      })
+      .catch(() => { /* keep defaults */ });
+  }, []);
 
   // Clock
   useEffect(() => {
