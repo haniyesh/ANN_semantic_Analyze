@@ -30,6 +30,12 @@ xgb_price_reg_*.json
 my_session.session
 telegram_session.session
 
+# Research paper / LaTeX (not part of the codebase)
+*.tex
+*.aux
+*.out
+*.pdf
+
 # Logs
 *.log
 
