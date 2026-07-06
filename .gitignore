@@ -4,9 +4,11 @@
 __pycache__/
 *.pyc
 *.npy
+*.npz
 *.pt
 *.pkl
 *.Zone.Identifier
+*:Zone.Identifier
 
 # Node
 node_modules/

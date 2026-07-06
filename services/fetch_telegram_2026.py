@@ -86,6 +86,7 @@ _EMOJI_RE = re.compile(
 )
 
 from pipeline.reduce_noise import passes_news_filter
+from config import impact_tier as _impact_tier
 
 
 # ── helpers ──────────────────────────────────────────────────────
@@ -409,7 +410,7 @@ def to_cache_items(msgs, cb_probs, p15, p1h, thr15, thr1h):
             "score_normalized": True,
             "pred_15m":        int(prob15 >= thr15),
             "pred_1h":         int(prob1h >= thr1h),
-            "impact":          "High" if max(prob15, prob1h) >= 0.80 else ("Medium" if max(prob15, prob1h) >= 0.55 else "Low"),  # gates synced with config.SCORE_THRESHOLD_HOT/MEDIUM
+            "impact":          _impact_tier(prob15, prob1h),
             "source":          "telegram_2025_2026",
         })
     return items

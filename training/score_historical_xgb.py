@@ -52,6 +52,7 @@ from pipeline.reduce_noise import (
     BLOCKED_CHANNELS, NOISE_TITLE_RE, CRYPTO_KW_RE,
     CRYPTO_FILTERED_CHANNELS, passes_news_filter,
 )
+from config import impact_tier as _impact_tier
 
 MONTHS_WINDOW = 3   # last 3 months
 
@@ -204,7 +205,7 @@ def to_cache_items(df: pd.DataFrame, p15: np.ndarray, p1h: np.ndarray,
         sentiment = str(row.get("sentiment", "neutral") or "neutral")
         sig_type  = "BUY" if sentiment == "positive" else "SELL" if sentiment == "negative" else "NEUTRAL"
 
-        impact = "High" if max(prob15, prob1h) >= 0.80 else ("Medium" if max(prob15, prob1h) >= 0.55 else "Low")  # gates synced with config.SCORE_THRESHOLD_HOT/MEDIUM
+        impact = _impact_tier(prob15, prob1h)
 
         items.append({
             "id":              f"hist_{pub_ts}_{hash(str(row.get('title', ''))[:30]) % 100000}",

@@ -77,6 +77,7 @@ class ExplainRequest(BaseModel):
 from config import (
     API_HOST, API_PORT, GROQ_API_KEYS, GROQ_CLASSIFICATION_MODEL, validate_api,
     SCORE_THRESHOLD_HOT, SCORE_THRESHOLD_MEDIUM, SCORE_THRESHOLD_SHOW, CONF_SHOW,
+    impact_tier as _config_impact_tier,
 )
 from log import setup_logging, get_logger
 
@@ -177,14 +178,12 @@ def _max_score(item: dict) -> float:
 
 
 def _recompute_impact(item: dict) -> str:
-    """Impact badge computed live from scores so it always matches config thresholds.
-    Cache vocabulary: High | Medium | Low."""
-    s = _max_score(item)
-    if s >= SCORE_HOT:
-        return "High"
-    if s >= SCORE_MED:
-        return "Medium"
-    return "Low"
+    """Impact badge recomputed live from scores — single source of truth is config.impact_tier().
+    Vocabulary: Hot | Medium | Show | Low"""
+    return _config_impact_tier(
+        item.get("model_score", 0) or 0,
+        item.get("model_score_1h", 0) or 0,
+    )
 
 
 def _passes_display(item: dict) -> bool:
@@ -718,6 +717,20 @@ def get_fear_greed():
             return {"value": value, "label": label, "timestamp": int(data["timestamp"]), "source": "live"}
     except Exception as e:
         return {"value": 50, "label": "Neutral", "timestamp": 0, "source": "error", "error": str(e)}
+
+
+@app.get("/config")
+def get_config():
+    """Expose display thresholds so clients (dashboard, tests) can stay in sync.
+    All values derived from config.py — this is the contract between server and frontend."""
+    return {
+        "score_hot":          SCORE_HOT,
+        "score_medium":       SCORE_MED,
+        "score_show":         SCORE_SHOW,
+        "conf_min":           CONF_MIN,
+        "reliable_channels":  ["the_block_crypto", "coindesk", "cointelegraph", "WatcherGuru", "google_news"],
+        "impact_labels":      ["Hot", "Medium", "Show", "Low"],
+    }
 
 
 @app.get("/health")

@@ -39,6 +39,7 @@ from training.xgboost_train_groq import (
     DUAL_EMB_DIM,
     GROQ_CACHE,
 )
+from config import impact_tier as _impact_tier
 
 import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
@@ -208,8 +209,7 @@ def to_cache_items(df: pd.DataFrame, p15: np.ndarray, p1h: np.ndarray,
         sentiment = str(row.get("sentiment", "neutral") or "neutral")
         sig_type  = "BUY" if sentiment == "positive" else ("SELL" if sentiment == "negative" else "NEUTRAL")
 
-        score = max(prob15, prob1h)
-        impact = "High" if score >= 0.80 else ("Medium" if score >= 0.55 else "Low")  # gates synced with config.SCORE_THRESHOLD_HOT/MEDIUM
+        impact = _impact_tier(prob15, prob1h)
 
         items.append({
             "id":              f"hist_{pub_ts}_{hash(str(row.get('title',''))[:30]) % 100000}",
