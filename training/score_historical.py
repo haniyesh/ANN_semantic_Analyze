@@ -19,7 +19,10 @@ import torch
 warnings.filterwarnings("ignore")
 
 HERE = Path(__file__).parent
+ROOT = HERE.parent
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
+from config import impact_tier as _impact_tier
 
 CSV_PATH   = HERE / "news_cleaned_filtered_scored.csv"
 EMB_CACHE  = HERE / "cryptobert_v8_pipeline.npy"
@@ -224,7 +227,7 @@ def to_cache_items(df, preds):
             "pred_15m":        int(preds["pred_15m"][idx]),
             "pred_1h":         int(preds["pred_1h"][idx]),
             "direction":       int(preds["direction"][idx]),
-            "impact":          "High" if max(score_15m, score_1h) >= 0.50 else ("Medium" if max(score_15m, score_1h) >= 0.25 else "Low"),
+            "impact":          _impact_tier(score_15m, score_1h),
             "news_type":       str(row.get("news_type", "")),
             "source":          "historical_v8",
         })

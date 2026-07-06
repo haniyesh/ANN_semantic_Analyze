@@ -22,6 +22,8 @@ import pandas as pd
 warnings.filterwarnings("ignore")
 
 ROOT           = Path(__file__).parent.parent
+import sys; sys.path.insert(0, str(ROOT))
+from config import impact_tier as _impact_tier
 CSV_PATH       = ROOT / "news_cleaned_filtered_scored.csv"
 GROQ_CACHE     = ROOT / "groq_sentiment_cache.json"
 CACHE_FILE     = ROOT / "news_cache.json"
@@ -85,7 +87,7 @@ def build_cache_items(df: pd.DataFrame, groq: dict) -> list:
         sent_score = float(row.get("sentiment_score") or 0)
         model_score = confidence if label != "neutral" else confidence * 0.3
 
-        impact = "High" if model_score >= 0.60 else ("Medium" if model_score >= 0.35 else "Low")
+        impact = _impact_tier(model_score, model_score)
 
         items.append({
             "id":              f"groq_{pub_ts}_{hash(title[:30]) % 100000}",

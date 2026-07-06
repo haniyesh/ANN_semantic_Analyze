@@ -43,11 +43,12 @@ def test_live_builder_reads_ensemble_columns():
 
 
 def test_ensemble_math_runs_without_torch():
-    """Exec just the pure-python helper and check averaging + agreement logic."""
-    fn_src = _extract_function(ROOT / "services" / "sentiment_score.py", "_ensemble_columns")
+    """Exec just the pure-python helper and check averaging + agreement logic.
+    Function was moved from sentiment_score.py to services/ensemble.py as ensemble_probs."""
+    fn_src = _extract_function(ROOT / "services" / "ensemble.py", "ensemble_probs")
     ns = {}
     exec(fn_src, ns)
-    _ensemble_columns = ns["_ensemble_columns"]
+    _ensemble_columns = ns["ensemble_probs"]
 
     # All bullish → positive net, full agreement.
     out = _ensemble_columns((0.7, 0.1, 0.2), (0.6, 0.2, 0.2), (0.8, 0.1, 0.1))

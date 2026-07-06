@@ -9,6 +9,7 @@ import importlib.util
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -32,6 +33,7 @@ def test_training_quarantines_unreliable_timestamps():
     assert int((~rel).sum()) == 2
 
 
+@pytest.mark.skip(reason="services/merge_all_sources.py was deleted; dataset build now uses fetch_telegram_2026.py")
 def test_build_row_flag_propagates():
     m = _load_module("services/merge_all_sources.py", "merge_all_sources")
     reliable = m._build_row("a real headline here", "2023-01-02T12:00:00Z", "c",

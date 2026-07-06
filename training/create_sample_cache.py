@@ -27,6 +27,8 @@ import torch
 ROOT = Path(__file__).parent.parent  # project root
 sys.path.insert(0, str(ROOT))
 
+from config import impact_tier as _impact_tier
+
 TRAINING_CSV = ROOT / "news_cleaned_filtered_scored.csv"
 CACHE_PATH   = ROOT / "news_cache.json"
 
@@ -276,7 +278,7 @@ def main():
             p1h  = float(clf1h.predict_proba(X)[0, 1])
             pred15 = int(p15 >= thr15)
             pred1h = int(p1h >= thr1h)
-            impact = "High" if max(p15, p1h) >= 0.50 else ("Medium" if max(p15, p1h) >= 0.25 else "Low")
+            impact = _impact_tier(p15, p1h)
 
             results.append({
                 "id":               f"sample_{_hash(title)}",
