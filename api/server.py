@@ -74,7 +74,10 @@ class ExplainRequest(BaseModel):
     channel: str = "unknown"
     similar: list = []
 
-from config import API_HOST, API_PORT, GROQ_API_KEYS, GROQ_CLASSIFICATION_MODEL, validate_api
+from config import (
+    API_HOST, API_PORT, GROQ_API_KEYS, GROQ_CLASSIFICATION_MODEL, validate_api,
+    SCORE_THRESHOLD_HOT, SCORE_THRESHOLD_MEDIUM, SCORE_THRESHOLD_SHOW, CONF_SHOW,
+)
 from log import setup_logging, get_logger
 
 setup_logging(log_file=os.getenv("LOG_FILE"))
@@ -158,13 +161,13 @@ from pipeline.reduce_noise import BLOCKED_CHANNELS, passes_news_filter as _passe
 def _passes_noise_filter(item: dict) -> bool:
     return _passes_news_filter(item.get("title", ""), item.get("channel", ""))
 
-# Impact / gate thresholds — kept in sync with config.py and dashboard/App.tsx.
-# Applied to max(model_score, model_score_1h). Confidence is in 0–100 units.
-SCORE_HOT    = 0.80   # Hot    tier: max(s15,s1h) ≥0.80  → alert
-SCORE_MED    = 0.55   # Medium tier: max(s15,s1h) ≥0.55
-SCORE_SHOW   = 0.30   # Show   tier: minimum score to display in feed
-SCORE_HIGH   = SCORE_HOT   # alias used in hot_news / explain endpoint
-CONF_MIN     = 50.0   # minimum confidence to display at all (0–100 units)
+# Impact / gate thresholds — imported from config.py (single source of truth).
+# Applied to max(model_score, model_score_1h). Confidence is in 0–100 units here.
+SCORE_HOT  = SCORE_THRESHOLD_HOT       # 0.80
+SCORE_MED  = SCORE_THRESHOLD_MEDIUM    # 0.55
+SCORE_SHOW = SCORE_THRESHOLD_SHOW      # 0.30
+SCORE_HIGH = SCORE_HOT                 # alias used in hot_news / explain endpoint
+CONF_MIN   = CONF_SHOW * 100           # config is 0–1; server compares against 0–100 confidence
 
 
 def _max_score(item: dict) -> float:

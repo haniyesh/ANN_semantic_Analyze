@@ -198,21 +198,37 @@ def _load_model():
         thr15 = res.get("threshold_15m", thr15)
         thr1h = res.get("threshold_1h",  thr1h)
 
+    n_features = clf_15m.n_features_in_
+    if scaler.n_features_in_ != n_features:
+        raise RuntimeError(
+            f"Scaler expects {scaler.n_features_in_} features but model expects {n_features}. "
+            "Scaler and model were built separately — re-run training/xgboost_train_bert.py."
+        )
+
     _model_bundle = {
         "clf_15m": clf_15m, "clf_1h": clf_1h, "scaler": scaler,
         "fb_tok": fb_tok, "fb_mdl": fb_mdl,
         "thresh15": thr15, "thresh1h": thr1h,
+        "n_features": n_features,
     }
-    _log.info("XGBoost BERT loaded (thresh15=%.3f thresh1h=%.3f)", thr15, thr1h)
+    _log.info("XGBoost BERT loaded: %d features (thresh15=%.3f thresh1h=%.3f)",
+              n_features, thr15, thr1h)
     return _model_bundle
 
 
 def run_model(features: np.ndarray) -> dict:
-    """Run XGBoost BERT on a single 1569-dim feature vector. Returns score + prediction."""
+    """Run XGBoost BERT on the feature vector produced by build_xgb_features."""
     bundle = _load_model()
     if not bundle:
         return {"model_score": 0.0, "model_score_1h": 0.0, "pred_15m": 0, "pred_1h": 0,
                 "prob_15m": 0.0, "reg_pred_15m": 0.0, "confidence_model": 0.0}
+
+    n_exp = bundle["n_features"]
+    if features.shape[0] != n_exp:
+        raise ValueError(
+            f"Feature vector is {features.shape[0]}-dim but model expects {n_exp}. "
+            "Check RAG padding in build_xgb_features."
+        )
 
     X = bundle["scaler"].transform(features.reshape(1, -1)).astype(np.float32)
     p15 = float(bundle["clf_15m"].predict_proba(X)[0, 1])
