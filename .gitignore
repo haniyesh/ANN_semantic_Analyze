@@ -51,3 +51,4 @@ groq_sentiment_cache.json
 # Results JSONs are intentionally tracked — main.py and the API read
 # thresholds and metrics from them at startup.
 # xgb_bert_results.json, xgb_groq_results.json, ann_*_results.json → committed
+.github/workflows/
