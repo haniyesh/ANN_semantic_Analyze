@@ -1,0 +1,4 @@
+# Tell GitHub Linguist that the dashboard is a frontend component of a Python project.
+# Without this, App.tsx (~2600 lines) dominates the byte count and shows TypeScript
+# as the repo's primary language instead of Python.
+dashboard2/* linguist-vendored=true
