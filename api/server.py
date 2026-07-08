@@ -676,6 +676,17 @@ async def ingest_news(item: IngestNewsItem, x_api_key: str = Header(default=""))
             _log.error("Cache write failed: %s", e)
     asyncio.create_task(_write_cache())
 
+    # Index to Qdrant for future RAG retrieval (fire-and-forget; Qdrant is optional)
+    if item.get("id"):
+        _item_snap = dict(item)
+        async def _index_qdrant():
+            try:
+                from pipeline.rag_news import index_live_news
+                await asyncio.to_thread(index_live_news, _item_snap)
+            except Exception as _e:
+                _log.warning("Qdrant live index failed: %s", _e)
+        asyncio.create_task(_index_qdrant())
+
     # Broadcast to WebSocket clients
     await _broadcast(_ws_all_clients, item)
     if max(abs(float(item.get("model_score", 0))),
@@ -1523,13 +1534,9 @@ def _analyze_custom_sync(title: str) -> dict:
                 {"title": s.get("title",""), "change": s.get("btc_change_15m", 0.0), "sim": s.get("similarity_score", 0.0)}
                 for s in rag_result.get("similar_news", [])[:3]
             ]
-            rag_features = rag_result["features"]
-            features = _build_features(cb_emb, fb_emb, sent, pub_dt)
-            features  = np.concatenate([features, rag_features]).astype(np.float32)
-            X    = scaler.transform(features.reshape(1, -1)).astype(np.float32)
-            p15  = float(clf15.predict_proba(X)[0, 1])
-            pred = int(p15 >= thr15)
-            impact = _config_impact_tier(p15, p15)
+            # Model was trained in skip-RAG mode (RAG dim = np.zeros(1)).
+            # rag_result["features"] is 10-dim; concatenating it would produce
+            # 1578-dim and break the scaler. Use similar_news for display only.
         except Exception:
             pass
 

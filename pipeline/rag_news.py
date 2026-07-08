@@ -757,6 +757,100 @@ def add_new_point(
     )
 
 
+def index_live_news(item: dict) -> None:
+    """Index one live news item into Qdrant immediately after ingest.
+
+    btc_change fields are unknown at ingest time and default to 0.0.
+    They remain 0.0 in the index — callers should use add_new_point() later
+    if the actual outcome becomes available.
+
+    Uses a UUID point ID (first 32 hex chars of the item's SHA1 id) so it
+    never collides with the integer-indexed training points.
+
+    Raises nothing — Qdrant is optional and failures are silently logged.
+    """
+    import uuid as _uuid
+    import logging
+
+    try:
+        item_id = (item.get("id") or "")
+        if not item_id or len(item_id) < 32:
+            return
+
+        point_id = str(_uuid.UUID(hex=item_id[:32]))
+        ts       = int(item.get("published_ts") or time.time())
+        title    = (item.get("title") or "")[:200]
+        channel  = item.get("channel", "")
+        link     = item.get("link", "")
+
+        dt   = pd.Timestamp(ts, unit="s", tz="UTC")
+        hour = dt.hour
+        dow  = dt.dayofweek
+
+        client   = get_client()
+        embedder = get_embedder()
+        vector   = list(embedder.embed([title]))[0].tolist()
+
+        client.upsert(
+            collection_name=COLLECTION_NAME,
+            points=[PointStruct(
+                id=point_id, vector=vector,
+                payload={
+                    "timestamp":        ts,
+                    "title":            title,
+                    "channel":          channel,
+                    "published":        str(dt),
+                    "link":             link,
+                    "btc_change_15m":   0.0,
+                    "btc_change_1h":    0.0,
+                    "is_impactful_15m": 0,
+                    "is_impactful_1h":  0,
+                    "is_impactful":     0,
+                    "is_weekend":       float(dow >= 5),
+                    "is_low_liquidity": float(2 <= hour <= 6),
+                    "is_us_hours":      float(13 <= hour <= 21),
+                    "is_asia_hours":    float(0 <= hour <= 8),
+                    "fomc_week":        0.0,
+                    "btc_price_at":     float(item.get("btc_price_at", 0) or 0),
+                },
+            )],
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Qdrant live index failed: %s", exc)
+
+
+def update_live_news_outcome(item_id: str, btc_change_15m: float, btc_change_1h: float) -> None:
+    """Patch the btc_change fields on a previously indexed live news point.
+
+    Called ~20 minutes after ingest once real price outcomes are known.
+    Uses set_payload (no re-embedding needed).
+    """
+    import uuid as _uuid
+    import logging
+
+    try:
+        if not item_id or len(item_id) < 32:
+            return
+        point_id = str(_uuid.UUID(hex=item_id[:32]))
+        client   = get_client()
+        client.set_payload(
+            collection_name=COLLECTION_NAME,
+            payload={
+                "btc_change_15m":   btc_change_15m,
+                "btc_change_1h":    btc_change_1h,
+                "is_impactful_15m": int(abs(btc_change_15m) >= IMPACT_THRESHOLD_15M),
+                "is_impactful_1h":  int(abs(btc_change_1h)  >= IMPACT_THRESHOLD_1H),
+                "is_impactful":     int(
+                    abs(btc_change_15m) >= IMPACT_THRESHOLD_15M or
+                    abs(btc_change_1h)  >= IMPACT_THRESHOLD_1H
+                ),
+            },
+            points=[point_id],
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Qdrant outcome update failed: %s", exc)
+
+
 # ══════════════════════════════════════════════════════════════════
 # check_news() — standalone similarity search
 # ══════════════════════════════════════════════════════════════════

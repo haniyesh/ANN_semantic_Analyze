@@ -12,7 +12,7 @@ The system listens to crypto news Telegram channels in real time, passes each he
 
 **Two layers:**
 1. **Live pipeline** — Telegram listener → sentiment analysis → feature extraction → impact scoring → live dashboard
-2. **Prediction models** — XGBoost and ANN classifiers trained to predict whether a BTC headline causes a ≥0.5% price move within 15 minutes or 1 hour
+2. **Prediction models** — XGBoost and ANN classifiers trained to predict whether a BTC headline causes a ≥0.3% price move within 15 minutes or ≥0.5% within 1 hour
 
 ---
 
@@ -20,10 +20,10 @@ The system listens to crypto news Telegram channels in real time, passes each he
 
 | Property | Value |
 |---|---|
-| Total headlines | 76,220 |
+| Total headlines | 76,214 |
 | Date range | Aug 2021 – Jul 2026 |
 | Sources | 7 Telegram channels |
-| Impactful (15-min, ≥0.5% BTC) | 7.2% — 5,454 items |
+| Impactful (15-min, ≥0.3% BTC) | 17.7% — 13,498 items |
 | Impactful (1-hour, ≥0.5% BTC) | 22.8% — 17,395 items |
 | Split | Chronological 70 / 15 / 15 |
 
@@ -35,65 +35,70 @@ The system listens to crypto news Telegram channels in real time, passes each he
 |---|---|---|
 | Train | 53,354 | Aug 2021 → Jul 2025 |
 | Validation | 11,433 | Jul 2025 → Dec 2025 |
-| Test | 11,433 | Dec 2025 → Jul 2026 |
+| Test | 11,365 | Dec 2025 → Jul 2026 |
+
+> Test set is 11,365 rows (68 dropped from the nominal 11,433 for missing forward prices).
 
 ---
 
 ## Model Architecture
 
-### Feature Vector — 1,569 dimensions
+### Feature Vectors
 
-| Group | Dims | Description |
-|---|---|---|
-| CryptoBERT embedding | 768 | Domain-adapted BERT for crypto text |
-| FinBERT embedding | 768 | Finance-domain BERT |
-| Sentiment ensemble | 13 | Per-model probabilities from CryptoBERT + FinBERT + RoBERTa-Twitter |
-| News-type classification | 11 | Cosine similarity to category prototypes |
-| Macro timing features | 8 | Weekend, low-liquidity hours, US/Asia hours, FOMC week, etc. |
-| RAG / historical context | 1 | Similar-news retrieval signal (zeroed in skip-RAG mode) |
+The two sentiment branches share all blocks except sentiment dimensionality:
+
+| Group | BERT branch | Groq branch | Description |
+|---|---|---|---|
+| CryptoBERT embedding | 768 | 768 | Domain-adapted BERT for crypto text |
+| FinBERT embedding | 768 | 768 | Finance-domain BERT |
+| Sentiment | **13** | **6** | BERT: cb+fb+rb probs (9) + net\_agreement + score + weight + conf; Groq: 3-class label + score + weight + conf |
+| News-type classification | 11 | 11 | Cosine similarity to 11 category prototypes |
+| Macro timing features | 8 | 8 | Weekend, low-liquidity hours, US/Asia hours, FOMC week, price context |
+| RAG / historical context | 1 | 1 | Zeroed in skip-RAG training mode |
+| **Total** | **1,569** | **1,562** | |
 
 ### Model Variants
 
-Four classifiers were evaluated — two architectures × two sentiment backbones:
+Four classifiers — two architectures × two sentiment backbones:
 
-| Model | Params | Sentiment source |
-|---|---|---|
-| **XGBoost + CryptoBERT** | n_estimators=500 | CryptoBERT + FinBERT ensemble |
-| **XGBoost + Groq/Llama** | n_estimators=500 | Llama-3.3-70B via Groq API |
-| **ANN + CryptoBERT** | 54,615 | CryptoBERT + FinBERT ensemble |
-| **ANN + Groq/Llama** | 54,447 | Llama-3.3-70B via Groq API |
+| Model | Params | Feature dims | Sentiment source |
+|---|---|---|---|
+| **XGBoost + CryptoBERT** | n\_estimators=500 | 1,569 | CryptoBERT + FinBERT + RoBERTa-Twitter ensemble |
+| **XGBoost + Groq/Llama** | n\_estimators=500 | 1,562 | Llama-3.3-70B via Groq API |
+| **ANN + CryptoBERT** | 54,615 | 1,569 | CryptoBERT + FinBERT + RoBERTa-Twitter ensemble |
+| **ANN + Groq/Llama** | 54,447 | 1,562 | Llama-3.3-70B via Groq API |
 
 ---
 
 ## Results
 
-### 15-Minute Horizon (test set)
+### 15-Minute Horizon (test set, 11,365 rows, 18.2% positive)
 
-| Model | Threshold | Accuracy | Precision | Recall | F1 | ROC-AUC |
+| Model | Decision thr. | Accuracy | Precision | Recall | F1 | ROC-AUC |
 |---|---|---|---|---|---|---|
-| **XGBoost + CryptoBERT** | 0.50 | **76.1%** | 40.6% | **67.6%** | **50.7%** | 80.7% |
+| **XGBoost + CryptoBERT** | 0.50 | **76.1%** | **40.6%** | **67.6%** | **50.7%** | 80.7% |
 | XGBoost + Groq/Llama | 0.465 | 73.9% | 38.2% | 70.7% | 49.6% | **81.0%** |
 | ANN + CryptoBERT | 0.57 | 70.5% | 33.7% | 64.1% | 44.1% | 73.9% |
-| ANN + Groq/Llama | 0.59 | 74.1% | **35.8%** | 53.3% | 42.8% | 73.4% |
+| ANN + Groq/Llama | 0.59 | 74.1% | 35.8% | 53.3% | 42.8% | 73.4% |
 
-### 1-Hour Horizon (test set)
+### 1-Hour Horizon (test set, 11,365 rows, 22.2% positive)
 
-| Model | Threshold | Accuracy | Precision | Recall | F1 | ROC-AUC |
+| Model | Decision thr. | Accuracy | Precision | Recall | F1 | ROC-AUC |
 |---|---|---|---|---|---|---|
 | **XGBoost + CryptoBERT** | 0.39 | 61.2% | 33.0% | **72.8%** | **45.4%** | **71.2%** |
-| XGBoost + Groq/Llama | 0.42 | **63.6%** | 33.8% | 66.5% | 44.8% | 70.9% |
+| XGBoost + Groq/Llama | 0.42 | **63.6%** | **33.8%** | 66.5% | 44.8% | 70.9% |
 | ANN + CryptoBERT | 0.495 | 63.7% | 33.6% | 64.8% | 44.3% | 69.0% |
 | ANN + Groq/Llama | 0.49 | 64.2% | **33.8%** | 64.0% | 44.3% | 69.1% |
 
-### Baselines (15-min, test set)
+### Reference points (15-min, test set)
 
-| Baseline | F1 | Accuracy |
-|---|---|---|
-| Majority class (predict never-impactful) | 0.000 | 81.8% |
-| Random classifier | 0.181 | 70.0% |
-| Always predict impactful | 0.308 | 18.2% |
-| Volatility threshold | 0.535 | 68.3% |
-| **XGBoost + CryptoBERT** | **0.507** | **76.1%** |
+| | F1 | Accuracy | Note |
+|---|---|---|---|
+| Majority class (always non-impactful) | 0.000 | 81.8% | Causal baseline |
+| Random classifier | 18.1% | 70.0% | Causal baseline |
+| Always predict impactful | 30.8% | 18.2% | Causal baseline |
+| Volatility oracle | 53.5% | 68.3% | **Non-causal** — thresholds the same realized return that defines the label; upper-bound reference only |
+| **XGBoost + CryptoBERT** | **50.7%** | **76.1%** | Best causal model |
 
 ---
 
@@ -113,10 +118,10 @@ A React dashboard that connects to the backend via WebSocket and REST.
 
 | Tier | Score gate | Meaning |
 |------|-----------|---------|
-| 🔥 Hot | ≥ 0.80 | High confidence strong signal |
+| Hot | ≥ 0.80 | High confidence strong signal |
 | Medium | ≥ 0.55 | Moderate predicted impact |
 | Show | ≥ 0.30 | Low but notable signal |
-| Low / Hidden | < 0.30 | Filtered from main feed |
+| Hidden | < 0.30 | Filtered from main feed |
 
 ---
 
@@ -180,44 +185,46 @@ npm run build      # production build → dist/
 ## Project Structure
 
 ```
-├── main.py                      # Entry point: Telegram → score → API
-├── config.py                    # All thresholds and impact tiers (single source of truth)
+├── main.py                           # Entry point: Telegram → score → API
+├── config.py                         # All thresholds and impact tiers (single source of truth)
 ├── requirements.txt
 ├── .env.example
 │
 ├── api/
-│   └── server.py                # FastAPI: REST + WebSocket + Binance proxy
+│   └── server.py                     # FastAPI: REST + WebSocket + Binance proxy
 │
 ├── bot/
-│   ├── telegram_listener.py     # Cursor-based backfill + real-time listener
-│   └── telegram_alert.py        # Pushes high-impact alerts to Telegram
+│   ├── telegram_listener.py          # Cursor-based backfill + real-time listener
+│   └── telegram_alert.py             # Pushes high-impact alerts to Telegram
 │
 ├── pipeline/
-│   ├── spam_filter.py           # Pre-filters incoming headlines
-│   ├── rag_news.py              # Similar-news retrieval (Qdrant)
+│   ├── spam_filter.py                # Pre-filters incoming headlines
+│   ├── rag_news.py                   # Similar-news retrieval (Qdrant)
 │   ├── processor.py
-│   └── reduce_noise.py          # Channel and noise filters
+│   └── reduce_noise.py               # Channel and noise filters
 │
 ├── services/
-│   ├── sentiment_score.py       # Multi-model sentiment ensemble (BERT + Groq)
-│   ├── price_fetcher.py         # Live BTC/ETH price tracking
+│   ├── sentiment_score.py            # Multi-model sentiment ensemble (BERT + Groq)
+│   ├── price_fetcher.py              # Live BTC/ETH price tracking
 │   └── ...
 │
 ├── storage/
-│   ├── news_cache.json          # Live rolling 3-month news cache
+│   ├── news_cache.json               # Live rolling 3-month news cache
 │   ├── database.py
 │   └── cache.py
 │
 ├── training/
-│   ├── xgboost_v9.py            # Train XGBoost + BERT model
-│   ├── xgboost_v10_groq.py      # Train XGBoost + Groq model
-│   ├── ann_bert.py              # Train ANN + BERT model
-│   ├── ann_groq.py              # Train ANN + Groq model
-│   ├── create_sample_cache.py   # Generate a sample cache for testing
-│   └── score_groq_only.py       # Re-score cached items with Groq sentiment
+│   ├── xgboost_train_bert.py         # Train XGBoost + CryptoBERT model
+│   ├── xgboost_train_groq.py         # Train XGBoost + Groq/Llama model
+│   ├── ann_train.py                  # Train ANN (--sentiment bert or --sentiment groq)
+│   ├── score_historical_xgb.py       # Score historical CSV with BERT model
+│   ├── score_historical_xgb_groq.py  # Score historical CSV with Groq model
+│   ├── build_groq_csv.py             # Build Groq sentiment cache from CSV
+│   ├── create_sample_cache.py        # Generate a sample cache for testing
+│   └── score_groq_only.py            # Re-score cached items with Groq sentiment
 │
 └── dashboard2/
-    ├── src/App.tsx              # React dashboard (single-file)
+    ├── src/App.tsx                   # React dashboard (single-file)
     ├── public/
     └── package.json
 ```
@@ -230,12 +237,14 @@ npm run build      # production build → dist/
 
 Reproducing results from a clean clone is **not yet fully possible** — several inputs are not committed:
 
-- `news_cleaned_filtered_scored.csv` — the training table; built from Telegram-collected data
-- Embedding caches (`cryptobert_v8_pipeline.npy`, `finbert_v9_pipeline.npy`) — generated by training scripts
-- Fitted scaler (`xgboost_v9_scaler.pkl`) — generated by training run
-- Model files (`xgboost_v9.json`, `ann_bert.pt`, etc.) — output of training
+- `news_cleaned_filtered_scored.csv` — training table (BERT branch); built from Telegram-collected data
+- `news_cleaned_filtered_scored_groq.csv` — training table (Groq branch)
+- `cryptobert_embeddings_cache.npy`, `finbert_embeddings_cache.npy` — generated by training scripts
+- `xgb_feature_scaler_bert.pkl`, `xgb_feature_scaler_groq.pkl` — fitted scalers
+- `xgb_impact_clf_15m_bert.json`, `xgb_impact_clf_15m_groq.json`, etc. — XGBoost model files
+- `ann_bert_weights.pt`, `ann_groq_weights.pt` — ANN weights
 
-A Qdrant instance (`QDRANT_URL` + `QDRANT_API_KEY`) is required for RAG. Train without it using `--skip-rag` (RAG feature is zeroed; model expects exactly 1 RAG dim).
+A Qdrant instance (`QDRANT_URL` + `QDRANT_API_KEY`) is required for RAG retrieval. Train without it using `--skip-rag` (RAG feature is zeroed to 1 dim; all four reported models were trained in this mode).
 
 ---
 
@@ -243,23 +252,25 @@ A Qdrant instance (`QDRANT_URL` + `QDRANT_API_KEY`) is required for RAG. Train w
 
 1. ~~**Random split**~~ **Fixed.** Split is now strictly chronological (train ends before val starts, val ends before test starts).
 
-2. ~~**RAG index leakage**~~ **Fixed.** Qdrant index is built from training rows only.
+2. ~~**RAG index leakage**~~ **Fixed.** Qdrant index is built from training rows only; val/test rows are excluded.
 
-3. ~~**No baselines**~~ **Fixed.** Majority-class, random, always-impactful, and volatility baselines are evaluated on the test set.
+3. ~~**No baselines**~~ **Fixed.** Majority-class, random, always-impactful baselines and a volatility oracle reference are evaluated on the test set.
 
 4. ~~**Train/serve skew**~~ **Largely fixed.** Sentiment, price context, and RAG similarity are consistent between training and serving.
 
 5. **BTC only.** Both classifiers are trained on Bitcoin price moves. ETH headlines are scored with the BTC model — treat ETH predictions as illustrative.
 
-6. **0.5% threshold is noisy.** BTC regularly moves ≥0.5% in 15 minutes from normal volatility alone. A portion of positive-class labels may be noise rather than news-driven signal.
+6. **Label noise at short horizons.** The 15-min label threshold (0.3%) is aggressive — BTC regularly moves ≥0.3% from normal intraday volatility alone. A portion of positive-class labels may be noise rather than news-driven signal.
 
-7. **Latency.** The pipeline processes headlines after they appear on Telegram. Fast price reactions may complete before scoring finishes.
+7. **Volatility oracle is not a causal baseline.** The volatility reference row in the results table thresholds the same realized return that defines the label, so it has perfect look-ahead. It is an upper-bound reference, not a comparable predictor.
 
-8. **Training artifacts not committed.** Embedding caches and model files are not in the repo.
+8. **Latency.** The pipeline processes headlines after they appear on Telegram. Fast price reactions may complete before scoring finishes.
 
-9. **Headlines only.** Full article body is not used; only the headline/lead sentence from Telegram.
+9. **Training artifacts not committed.** Embedding caches and model files are not in the repo.
 
-10. **Crypto market dynamics shift rapidly.** Periodic retraining is recommended as market conditions and relevant news types evolve.
+10. **Headlines only.** Full article body is not used; only the headline/lead sentence from Telegram.
+
+11. **Crypto market dynamics shift rapidly.** Periodic retraining is recommended as market conditions and relevant news types evolve.
 
 ---
 
@@ -272,7 +283,7 @@ A Qdrant instance (`QDRANT_URL` + `QDRANT_API_KEY`) is required for RAG. Train w
 | Backend | FastAPI, Uvicorn, WebSocket |
 | Frontend | React 18, Vite, Lightweight Charts |
 | Data collection | Telegram (Telethon), Binance API |
-| Vector DB | Qdrant (optional, for RAG) |
+| Vector DB | Qdrant (optional, for RAG similarity search) |
 | Database | PostgreSQL (optional; falls back to JSON cache) |
 
 ---

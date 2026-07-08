@@ -55,7 +55,7 @@ from config import (
 )
 
 from bot.telegram_listener import start as start_telegram_listener
-from services.price_fetcher import PriceTracker, extract_coin_from_text
+from services.price_fetcher import PriceTracker, extract_coin_from_text, get_price_at_times, calculate_movement
 from storage.database import (
     create_pool, create_tables,
     is_processed, mark_processed,
@@ -675,6 +675,8 @@ async def process_news_item(news: dict):
             pub_dt.strftime('%Y-%m-%d %H:%M UTC'), title[:55],
         )
         await send_to_dashboard(payload)
+        if payload.get("id"):
+            asyncio.create_task(_update_qdrant_outcome(payload))
     else:
         _log.debug(
             "Filtered | score=%.2f conf=%s%% | %s | %s",
@@ -696,6 +698,28 @@ async def process_news_item(news: dict):
             )
 
     return payload
+
+
+async def _update_qdrant_outcome(payload: dict, delay_seconds: int = 20 * 60) -> None:
+    """Wait delay_seconds, then patch the Qdrant point with real btc_change values."""
+    await asyncio.sleep(delay_seconds)
+    try:
+        pub_ts = payload.get("published_ts") or int(time_module.time())
+        pub_dt = datetime.fromtimestamp(pub_ts, tz=timezone.utc)
+        prices = await get_price_at_times("BTC", pub_dt, intervals=[15, 60])
+        p0, p15, p1h = prices.get(0), prices.get(15), prices.get(60)
+        if not p0 or not p15:
+            return
+        change_15m = calculate_movement(p0, p15).get("change_percent", 0.0)
+        change_1h  = calculate_movement(p0, p1h).get("change_percent", 0.0) if p1h else 0.0
+        from pipeline.rag_news import update_live_news_outcome
+        await asyncio.to_thread(
+            update_live_news_outcome, payload["id"], change_15m, change_1h
+        )
+        _log.debug("Qdrant updated | %s | 15m=%+.2f%% 1h=%+.2f%%",
+                   payload.get("title", "")[:50], change_15m, change_1h)
+    except Exception as exc:
+        _log.warning("Qdrant outcome update failed: %s", exc)
 
 
 # ══════════════════════════════════════════════════════════════════
