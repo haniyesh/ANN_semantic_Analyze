@@ -51,6 +51,7 @@ from config import (
     BATCH_SIZE,
     news_importance,
     FOMC_WEEK_DATES,
+    impact_tier,
 )
 
 from bot.telegram_listener import start as start_telegram_listener
@@ -643,11 +644,7 @@ async def process_news_item(news: dict):
         "pred_15m":         model_result["pred_15m"],
         "pred_1h":          model_result["pred_1h"],
         "confidence_model": model_result.get("confidence_model", 0.0),
-        "impact": (
-            "Hot"    if max(abs(model_score), abs(model_score_1h)) >= SCORE_THRESHOLD_HOT    else
-            "Medium" if max(abs(model_score), abs(model_score_1h)) >= SCORE_THRESHOLD_MEDIUM else
-            "Show"
-        ),
+        "impact":           impact_tier(model_score, model_score_1h),
         "age_minutes":      round(age_minutes, 1),
         "published_ts":     published_ts,
         "link":             news.get("link", ""),

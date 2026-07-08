@@ -21,7 +21,6 @@ os.environ.setdefault("LOG_LEVEL", "WARNING")   # quieten startup logs in tests
 @pytest.fixture(scope="module")
 def client():
     """Create a TestClient with a patched news_cache.json path."""
-    # Patch CACHE_FILE to a non-existent path so _load_cache returns []
     import api.server as srv
     from fastapi.testclient import TestClient
 
@@ -30,7 +29,9 @@ def client():
             with patch.object(srv, "historical_news", []):
                 with patch.object(srv, "all_news", []):
                     with patch.object(srv, "hot_news", []):
-                        yield TestClient(srv.app)
+                        # Pin the ingest key to a known test value regardless of .env
+                        with patch.object(srv, "_INGEST_API_KEY", "test-secret-key-abc123"):
+                            yield TestClient(srv.app)
 
 
 VALID_ITEM = {

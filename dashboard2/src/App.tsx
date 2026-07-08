@@ -2244,7 +2244,7 @@ export default function CryptoDashboard() {
   const allConnected = useWebSocket("/ws/all", (item) => {
     const norm = clientNormalize(item);
     if (!passesFilter(norm)) return;
-    setAllNews(prev => sortByTime([norm, ...prev]).slice(0, 200));
+    setAllNews(prev => sortByTime([norm, ...prev]).slice(0, 5000));
   });
   const hotConnected = useWebSocket("/ws/hot", (item) => {
     setHotSignals(prev => sortByTime([clientNormalize(item), ...prev]).slice(0, 50));
@@ -2261,7 +2261,7 @@ export default function CryptoDashboard() {
           .then(fresh => {
             const newItems = fresh.map(clientNormalize).filter(filterItem);
             if (!newItems.length) return;
-            setAllNews(p => sortByTime([...newItems, ...p]).slice(0, 500));
+            setAllNews(p => sortByTime([...newItems, ...p]).slice(0, 5000));
           })
           .catch(() => {});
         return prev;
@@ -2394,7 +2394,7 @@ export default function CryptoDashboard() {
             <img src="/logo_center.avif" alt="logo" style={{ width: 52, height: 52, borderRadius: 14, objectFit: "cover", display: "block" }} />
             <div style={{ position: "absolute", inset: -1, borderRadius: 15, background: "transparent", boxShadow: COLORS.accentGlow, pointerEvents: "none" }} />
           </div>
-          <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.text, letterSpacing: 0.5, textAlign: "center", lineHeight: 1.4 }}>Crypto Sentiment<br/><span style={{ color: COLORS.accent, fontWeight: 500, fontSize: 11 }}>Analyze</span></div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.text, letterSpacing: 0.5, textAlign: "center", lineHeight: 1.4 }}>Sentiment<br/><span style={{ color: COLORS.accent, fontWeight: 500, fontSize: 11 }}>Analysis</span></div>
         </div>
         <div style={{ flex: 1, padding: "14px 10px", overflowY: "auto" }}>
           {navItems.map(item => (

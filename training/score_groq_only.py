@@ -26,7 +26,7 @@ import sys; sys.path.insert(0, str(ROOT))
 from config import impact_tier as _impact_tier
 CSV_PATH       = ROOT / "news_cleaned_filtered_scored.csv"
 GROQ_CACHE     = ROOT / "groq_sentiment_cache.json"
-CACHE_FILE     = ROOT / "news_cache.json"
+CACHE_FILE     = ROOT / "storage" / "news_cache.json"
 
 
 def _title_key(title: str) -> str:

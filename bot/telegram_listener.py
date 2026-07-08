@@ -1,12 +1,14 @@
 import asyncio
+import json
 import re
 import sys
 from collections import OrderedDict
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
-BACKFILL_DAYS = 5      # fetch this many days of history on startup
-_SEEN_MAX     = 20_000  # bound the dedup set so memory stays flat
+_SEEN_MAX       = 20_000  # bound the dedup set so memory stays flat
+_FALLBACK_DAYS  = 30      # used only for channels with no stored history
 
 # Process-lifetime dedup of message links. Shared by the live handler and the
 # backfill so a message is never queued twice (e.g. a live message arriving
@@ -24,6 +26,31 @@ def _mark_seen(link: str) -> bool:
     if len(_seen_links) > _SEEN_MAX:
         _seen_links.popitem(last=False)  # evict oldest
     return True
+
+
+def _load_cursors(cache_path: Path) -> dict:
+    """Return {channel_username: max_telegram_msg_id} from the on-disk cache.
+
+    Only entries whose link field contains a parseable Telegram message URL
+    (https://t.me/<channel>/<id>) are counted. Channels with no stored
+    messages get no entry — the caller falls back to a date window.
+    """
+    cursors: dict[str, int] = {}
+    try:
+        with open(cache_path) as f:
+            items = json.load(f)
+    except Exception:
+        return cursors
+    for it in items:
+        link = it.get("link") or ""
+        m = re.search(r"t\.me/([^/]+)/(\d+)$", link)
+        if not m:
+            continue
+        ch_name = m.group(1)
+        msg_id  = int(m.group(2))
+        if cursors.get(ch_name, 0) < msg_id:
+            cursors[ch_name] = msg_id
+    return cursors
 
 
 def clean_url(url: str) -> str:
@@ -74,8 +101,9 @@ async def start(news_queue):
         await asyncio.Event().wait()
         return
 
-    from pathlib import Path
-    session_name = str(Path(__file__).resolve().parent.parent / "telegram_session")
+    ROOT         = Path(__file__).resolve().parent.parent
+    session_name = str(ROOT / "telegram_session")
+    cache_path   = ROOT / "storage" / "news_cache.json"
 
     if not sys.stdin.isatty():
         raise RuntimeError(
@@ -125,43 +153,70 @@ async def start(news_queue):
     print(f"[TELEGRAM] Connecting -- monitoring {len(TELEGRAM_CHANNELS)} channels...")
     await client.start()
 
-    # ── Backfill: fetch last BACKFILL_DAYS days of history ────────
-    cutoff = datetime.now(timezone.utc) - timedelta(days=BACKFILL_DAYS)
+    # ── Cursor-based backfill ─────────────────────────────────────
+    # For each channel, resume from the last Telegram message ID stored in
+    # cache (zero duplicates, no fixed time window). Channels with no stored
+    # history fall back to _FALLBACK_DAYS.
+    cursors = _load_cursors(cache_path)
+    fallback_cutoff = datetime.now(timezone.utc) - timedelta(days=_FALLBACK_DAYS)
+
     total_backfill = 0
     skipped = 0
-    print(f"[TELEGRAM] Backfilling last {BACKFILL_DAYS} days (since {cutoff.date()})...")
     for ch in TELEGRAM_CHANNELS:
+        last_id = cursors.get(ch, 0)
         count = 0
         try:
-            async for msg in client.iter_messages(ch, reverse=False, limit=None):
-                if not msg or not msg.date:
-                    continue
-                msg_dt = msg.date if msg.date.tzinfo else msg.date.replace(tzinfo=timezone.utc)
-                if msg_dt < cutoff:
-                    break
-                text = (msg.text or "").strip()
-                if not text:
-                    continue
-
-                link = _make_link(ch, msg.id)
-                if not _mark_seen(link):
-                    skipped += 1
-                    continue
-
-                title = text.splitlines()[0][:300]
-                news_queue.append({
-                    "title":  title,
-                    "text":   text,
-                    "source": ch,
-                    "link":   link,
-                    "pub_dt": msg_dt,
-                })
-                count += 1
+            if last_id:
+                print(f"[TELEGRAM] {ch}: resuming from msg_id {last_id}")
+                async for msg in client.iter_messages(ch, min_id=last_id, limit=None):
+                    if not msg or not msg.date:
+                        continue
+                    text = (msg.text or "").strip()
+                    if not text:
+                        continue
+                    link = _make_link(ch, msg.id)
+                    if not _mark_seen(link):
+                        skipped += 1
+                        continue
+                    msg_dt = msg.date if msg.date.tzinfo else msg.date.replace(tzinfo=timezone.utc)
+                    title = text.splitlines()[0][:300]
+                    news_queue.append({
+                        "title":  title,
+                        "text":   text,
+                        "source": ch,
+                        "link":   link,
+                        "pub_dt": msg_dt,
+                    })
+                    count += 1
+            else:
+                print(f"[TELEGRAM] {ch}: no history found — fetching last {_FALLBACK_DAYS} days")
+                async for msg in client.iter_messages(ch, reverse=False, limit=None):
+                    if not msg or not msg.date:
+                        continue
+                    msg_dt = msg.date if msg.date.tzinfo else msg.date.replace(tzinfo=timezone.utc)
+                    if msg_dt < fallback_cutoff:
+                        break
+                    text = (msg.text or "").strip()
+                    if not text:
+                        continue
+                    link = _make_link(ch, msg.id)
+                    if not _mark_seen(link):
+                        skipped += 1
+                        continue
+                    title = text.splitlines()[0][:300]
+                    news_queue.append({
+                        "title":  title,
+                        "text":   text,
+                        "source": ch,
+                        "link":   link,
+                        "pub_dt": msg_dt,
+                    })
+                    count += 1
         except Exception as e:
             print(f"[TELEGRAM] Backfill error for {ch}: {e}")
-        print(f"[TELEGRAM]   {ch}: {count} historical messages queued")
+        print(f"[TELEGRAM]   {ch}: {count} new messages queued")
         total_backfill += count
 
-    print(f"[TELEGRAM] Backfill complete — {total_backfill} queued, {skipped} duplicates skipped")
+    print(f"[TELEGRAM] Backfill complete — {total_backfill} queued, {skipped} in-process duplicates skipped")
     print(f"[TELEGRAM] Listening: {TELEGRAM_CHANNELS}")
     await client.run_until_disconnected()

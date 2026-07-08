@@ -138,6 +138,7 @@ def _check_rate_limit(client_ip: str, rpm: int = RATE_LIMIT_RPM):
 
 CACHE_FILE   = ROOT / "storage" / "news_cache.json"
 HIST_CSV     = ROOT / "news_cleaned_filtered_scored.csv"
+HISTORY_WINDOW_MONTHS = 3          # only serve news from the last N months
 
 # Canonical channel name map — None means "blocked, drop the item".
 # Single source of truth; applied via _normalize_channel() below.
@@ -232,6 +233,8 @@ def _load_cache() -> List[dict]:
                             ).timestamp())
                         except Exception:
                             pass
+            cutoff = int(time.time()) - HISTORY_WINDOW_MONTHS * 30 * 24 * 3600
+            items = [i for i in items if (i.get("published_ts") or 0) >= cutoff]
             return items
         except Exception as _e:
             _log.error("Failed to load %s: %s — dashboard will be empty until cache refreshes", CACHE_FILE, _e)
@@ -1085,7 +1088,7 @@ def get_report_summary():
             {"name": "Groq/Llama-3.3-70B sentiment (3 one-hot + 3 scalar)", "dims": 6},
             {"name": "News-type probs",          "dims": 11},
             {"name": "Macro timing (5) + price context (3)", "dims": 8},
-            {"name": "RAG features",             "dims": 10},
+            {"name": "RAG features",             "dims": 1},
         ],
         "embeddings": ["ElKulako/cryptobert (768)", "ProsusAI/finbert (768)"],
         "price_context": ["btc_vol (rolling std 20)", "btc_mom (rolling mean 5)", "fear_greed (Alternative.me)"],
@@ -1248,8 +1251,7 @@ async def explain_news(request: Request, item: ExplainRequest):
     channel   = item.channel
     similar   = item.similar
     max_score = max(score, score_1h)
-    impact    = ("Hot"    if max_score >= SCORE_HOT  else
-                 "Medium" if max_score >= SCORE_MED  else "Show")
+    impact    = _config_impact_tier(score, score_1h)
 
     sim_block = "No similar historical news found."
     if similar:
@@ -1494,15 +1496,14 @@ def _analyze_custom_sync(title: str) -> dict:
 
         pub_dt = datetime.now(tz=_tz.utc)
         features = _build_features(cb_emb, fb_emb, sent, pub_dt)
-        rag_zeros = np.zeros(10, dtype=np.float32)
+        rag_zeros = np.zeros(1, dtype=np.float32)
         features  = np.concatenate([features, rag_zeros]).astype(np.float32)
 
         X    = scaler.transform(features.reshape(1, -1)).astype(np.float32)
         p15  = float(clf15.predict_proba(X)[0, 1])
         pred = int(p15 >= thr15)
 
-        impact = ("Hot"    if p15 >= SCORE_HOT  else
-                  "Medium" if p15 >= SCORE_MED  else "Show")
+        impact = _config_impact_tier(p15, p15)
         signal = "BUY" if sent["sentiment"] == "positive" else ("SELL" if sent["sentiment"] == "negative" else "NEUTRAL")
 
         from training.xgboost_train_groq import crypto_news_type_classify
@@ -1528,7 +1529,7 @@ def _analyze_custom_sync(title: str) -> dict:
             X    = scaler.transform(features.reshape(1, -1)).astype(np.float32)
             p15  = float(clf15.predict_proba(X)[0, 1])
             pred = int(p15 >= thr15)
-            impact = ("Hot" if p15 >= SCORE_HOT else "Medium" if p15 >= SCORE_MED else "Show")
+            impact = _config_impact_tier(p15, p15)
         except Exception:
             pass
 

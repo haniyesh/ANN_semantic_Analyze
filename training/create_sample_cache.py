@@ -30,7 +30,7 @@ sys.path.insert(0, str(ROOT))
 from config import impact_tier as _impact_tier
 
 TRAINING_CSV = ROOT / "news_cleaned_filtered_scored.csv"
-CACHE_PATH   = ROOT / "news_cache.json"
+CACHE_PATH   = ROOT / "storage" / "news_cache.json"
 
 
 # ── Helpers ───────────────────────────────────────────────────────
@@ -263,12 +263,12 @@ def main():
             sent = _build_sentiment(cb_probs)
 
             if args.skip_rag:
-                rag = np.zeros(10, dtype=np.float32)
+                rag = np.zeros(1, dtype=np.float32)
             else:
                 try:
                     rag = _query_rag(title, pub_ts)
                 except Exception:
-                    rag = np.zeros(10, dtype=np.float32)
+                    rag = np.zeros(1, dtype=np.float32)
 
             features = _build_features(cb_emb, fb_emb, sent, pub_dt)
             features = np.concatenate([features, rag]).astype(np.float32)

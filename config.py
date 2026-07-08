@@ -23,7 +23,7 @@ DATABASE_URL = os.getenv("DB_URL")
 
 # ── AI / ML ───────────────────────────────────────────────────────────────────
 GROQ_API_KEY        = os.getenv("GROQ_API_KEY")
-GROQ_API_KEYS       = [k.strip() for k in os.getenv("GROQ_API_KEYS", os.getenv("GROQ_API_KEY", "")).split(",") if k.strip()]
+GROQ_API_KEYS       = [k.strip() for k in os.getenv("GROQ_API_KEYS", ",".join(filter(None, [os.getenv("GROQ_API_KEY"), os.getenv("GROQ_API_KEY_2")]))).split(",") if k.strip()]
 GROQ_CLASSIFICATION_MODEL = os.getenv("GROQ_CLASSIFICATION_MODEL", "llama-3.1-8b-instant")
 HF_API_KEY          = os.getenv("HF_API_KEY")
 
