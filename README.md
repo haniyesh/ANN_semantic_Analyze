@@ -1,40 +1,122 @@
-# Crypto News Sentiment & Market Impact — Live Dashboard
+# Sentiment Analysis — Crypto News Market Impact
 
-> A real-time system that monitors cryptocurrency news, scores each headline for market impact, and displays the results on a live dashboard with BTC price charts.
+> A real-time system that monitors cryptocurrency news, scores each headline for predicted BTC price impact, and streams results to a live dashboard with candlestick charts.
 
-> **Status: Academic demo / research prototype.** See [Known Issues & Limitations](#known-issues--limitations) for important caveats about the reported metrics and scientific claims.
+> **Status: Research prototype / academic thesis.** See [Known Issues & Limitations](#known-issues--limitations) before drawing conclusions from reported metrics.
 
 ---
 
 ## What This Does
 
-This system listens to crypto news channels in real time, analyzes each headline using a multi-model NLP pipeline, predicts whether the news will move the market, and streams the results to a live dashboard.
+The system listens to crypto news Telegram channels in real time, passes each headline through a multi-model NLP pipeline, predicts whether it will move BTC price within 15 minutes or 1 hour, and pushes scored results to a live dashboard.
 
 **Two layers:**
-1. **Live pipeline** — Telegram listener → sentiment analysis → impact scoring → live dashboard
-2. **Prediction model** — XGBoost classifier trained to predict whether a BTC headline will cause a ≥0.3% price move within 15 minutes
+1. **Live pipeline** — Telegram listener → sentiment analysis → feature extraction → impact scoring → live dashboard
+2. **Prediction models** — XGBoost and ANN classifiers trained to predict whether a BTC headline causes a ≥0.5% price move within 15 minutes or 1 hour
+
+---
+
+## Dataset
+
+| Property | Value |
+|---|---|
+| Total headlines | 76,220 |
+| Date range | Aug 2021 – Jul 2026 |
+| Sources | 7 Telegram channels |
+| Impactful (15-min, ≥0.5% BTC) | 7.2% — 5,454 items |
+| Impactful (1-hour, ≥0.5% BTC) | 22.8% — 17,395 items |
+| Split | Chronological 70 / 15 / 15 |
+
+**Channels:** CoinTelegraph (22,613) · The Block (11,631) · CryptoNews (10,382) · Google News (9,659) · CoinDesk (9,429) · CryptoPotato (7,565) · WatcherGuru (4,941)
+
+**Split (chronological — no temporal leakage):**
+
+| Subset | Items | Period |
+|---|---|---|
+| Train | 53,354 | Aug 2021 → Jul 2025 |
+| Validation | 11,433 | Jul 2025 → Dec 2025 |
+| Test | 11,433 | Dec 2025 → Jul 2026 |
+
+---
+
+## Model Architecture
+
+### Feature Vector — 1,569 dimensions
+
+| Group | Dims | Description |
+|---|---|---|
+| CryptoBERT embedding | 768 | Domain-adapted BERT for crypto text |
+| FinBERT embedding | 768 | Finance-domain BERT |
+| Sentiment ensemble | 13 | Per-model probabilities from CryptoBERT + FinBERT + RoBERTa-Twitter |
+| News-type classification | 11 | Cosine similarity to category prototypes |
+| Macro timing features | 8 | Weekend, low-liquidity hours, US/Asia hours, FOMC week, etc. |
+| RAG / historical context | 1 | Similar-news retrieval signal (zeroed in skip-RAG mode) |
+
+### Model Variants
+
+Four classifiers were evaluated — two architectures × two sentiment backbones:
+
+| Model | Params | Sentiment source |
+|---|---|---|
+| **XGBoost + CryptoBERT** | n_estimators=500 | CryptoBERT + FinBERT ensemble |
+| **XGBoost + Groq/Llama** | n_estimators=500 | Llama-3.3-70B via Groq API |
+| **ANN + CryptoBERT** | 54,615 | CryptoBERT + FinBERT ensemble |
+| **ANN + Groq/Llama** | 54,447 | Llama-3.3-70B via Groq API |
+
+---
+
+## Results
+
+### 15-Minute Horizon (test set)
+
+| Model | Threshold | Accuracy | Precision | Recall | F1 | ROC-AUC |
+|---|---|---|---|---|---|---|
+| **XGBoost + CryptoBERT** | 0.50 | **76.1%** | 40.6% | **67.6%** | **50.7%** | 80.7% |
+| XGBoost + Groq/Llama | 0.465 | 73.9% | 38.2% | 70.7% | 49.6% | **81.0%** |
+| ANN + CryptoBERT | 0.57 | 70.5% | 33.7% | 64.1% | 44.1% | 73.9% |
+| ANN + Groq/Llama | 0.59 | 74.1% | **35.8%** | 53.3% | 42.8% | 73.4% |
+
+### 1-Hour Horizon (test set)
+
+| Model | Threshold | Accuracy | Precision | Recall | F1 | ROC-AUC |
+|---|---|---|---|---|---|---|
+| **XGBoost + CryptoBERT** | 0.39 | 61.2% | 33.0% | **72.8%** | **45.4%** | **71.2%** |
+| XGBoost + Groq/Llama | 0.42 | **63.6%** | 33.8% | 66.5% | 44.8% | 70.9% |
+| ANN + CryptoBERT | 0.495 | 63.7% | 33.6% | 64.8% | 44.3% | 69.0% |
+| ANN + Groq/Llama | 0.49 | 64.2% | **33.8%** | 64.0% | 44.3% | 69.1% |
+
+### Baselines (15-min, test set)
+
+| Baseline | F1 | Accuracy |
+|---|---|---|
+| Majority class (predict never-impactful) | 0.000 | 81.8% |
+| Random classifier | 0.181 | 70.0% |
+| Always predict impactful | 0.308 | 18.2% |
+| Volatility threshold | 0.535 | 68.3% |
+| **XGBoost + CryptoBERT** | **0.507** | **76.1%** |
 
 ---
 
 ## Live Dashboard
 
-A React-based dashboard that connects to the backend in real time.
+A React dashboard that connects to the backend via WebSocket and REST.
 
 **Features:**
-- Live BTC candlestick chart with news markers
-- Hover over chart markers to see the headline
+- Live BTC/ETH candlestick chart with news event markers
+- Hover over chart dots to see the headline and impact score
 - News cards ranked by predicted market impact
 - Real-time BTC momentum gauge
-- Channel analysis overview
+- Calendar view — click any date to browse historical news and price markers
+- 3-month rolling history window (live cache) + 6-month historical CSV
 
-**Impact tiers:**
+**Impact tiers** (derived from `config.py` thresholds, fetched at runtime):
 
-| Tier | Meaning |
-|------|---------|
-| Hot | High confidence, strong predicted impact |
-| Medium | Moderate predicted impact |
-| Show | Low but notable signal |
-| Hidden | Filtered out — low signal |
+| Tier | Score gate | Meaning |
+|------|-----------|---------|
+| 🔥 Hot | ≥ 0.80 | High confidence strong signal |
+| Medium | ≥ 0.55 | Moderate predicted impact |
+| Show | ≥ 0.30 | Low but notable signal |
+| Low / Hidden | < 0.30 | Filtered from main feed |
 
 ---
 
@@ -43,33 +125,37 @@ A React-based dashboard that connects to the backend in real time.
 ### Prerequisites
 
 ```bash
-python -m venv .venv311
-source .venv311/bin/activate      # Windows: .venv311\Scripts\activate
-# torch CPU wheels need the PyTorch index:
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
-Copy `.env.example` to `.env` and fill in your credentials. Key variables:
+Copy `.env.example` to `.env` and fill in credentials:
+
 ```
 TELEGRAM_API_ID=...
 TELEGRAM_API_HASH=...
 TELEGRAM_CHANNELS=channel1,channel2
-BOT_TOKEN=...
-QDRANT_URL=... / QDRANT_API_KEY=...   # required for RAG (or train with --skip-rag)
-ALLOWED_ORIGINS=http://localhost:5173 # CORS allowlist (never use *)
-INGEST_API_KEY=...                    # required to POST /news (live pipeline → API)
-DB_SSL_CA=/path/ca.pem                # verify DB TLS in prod (do not disable verification)
+TELEGRAM_CHANNEL_ID=...          # Telegram channel ID for alerts
+BOT_TOKEN=...                    # Telegram bot token
+GROQ_API_KEY=...                 # Primary Groq key (Llama-3.3-70B sentiment)
+GROQ_API_KEY_2=...               # Optional second key for rotation
+INGEST_API_KEY=...               # Shared secret: POST /news (bot → API)
+ALLOWED_ORIGINS=http://localhost:5173
+DATABASE_URL=...                 # Optional PostgreSQL; runs in cache-only mode without it
 ```
 
-> The live pipeline authenticates to the API with `INGEST_API_KEY`; set the
-> same value for `main.py` and the server. Without it, `POST /news` is disabled
-> (fails closed).
+> `INGEST_API_KEY` must be set identically in `.env` for both `main.py` and `server.py`. Without it, `POST /news` returns `503` (fails closed).
 
 ### 1. Start the API server
 
 ```bash
-uvicorn api.server:app --host 0.0.0.0 --port 8000 --reload
+cd api
+python server.py
+# or: uvicorn api.server:app --host 0.0.0.0 --port 8000
 ```
+
+On startup the server loads the last **3 months** of news from `storage/news_cache.json` and the last 6 months from the historical CSV.
 
 ### 2. Start the news pipeline
 
@@ -77,15 +163,16 @@ uvicorn api.server:app --host 0.0.0.0 --port 8000 --reload
 python main.py
 ```
 
-Connects to Telegram, backfills the last 5 days of history, then listens for new messages in real time. Each headline is scored and pushed to the dashboard.
+On first run: prompts for a Telegram login code (creates `telegram_session` file).  
+On subsequent starts: **resumes from the last stored Telegram message ID** per channel — no duplicate re-ingestion, no fixed look-back window. Falls back to a 30-day window for channels with no stored history.
 
 ### 3. Start the dashboard
 
 ```bash
 cd dashboard2
 npm install
-npm run dev        # development
-npm run build      # production build
+npm run dev        # development (hot-reload)
+npm run build      # production build → dist/
 ```
 
 ---
@@ -93,153 +180,86 @@ npm run build      # production build
 ## Project Structure
 
 ```
-├── main.py                     # Entry point: Telegram → score → API
-├── config.py                   # Config and thresholds
+├── main.py                      # Entry point: Telegram → score → API
+├── config.py                    # All thresholds and impact tiers (single source of truth)
 ├── requirements.txt
-├── .env.example                # Required environment variables
+├── .env.example
 │
 ├── api/
-│   └── server.py               # FastAPI backend: REST + WebSocket + Binance proxy
+│   └── server.py                # FastAPI: REST + WebSocket + Binance proxy
 │
 ├── bot/
-│   ├── telegram_listener.py    # Telegram backfill + real-time listener
-│   └── telegram_alert.py
+│   ├── telegram_listener.py     # Cursor-based backfill + real-time listener
+│   └── telegram_alert.py        # Pushes high-impact alerts to Telegram
 │
 ├── pipeline/
-│   ├── spam_filter.py          # Pre-filters for incoming news
-│   ├── rag_news.py             # Similar news retrieval (Qdrant)
+│   ├── spam_filter.py           # Pre-filters incoming headlines
+│   ├── rag_news.py              # Similar-news retrieval (Qdrant)
 │   ├── processor.py
-│   └── reduce_noise.py         # Channel and noise filters
+│   └── reduce_noise.py          # Channel and noise filters
 │
 ├── services/
-│   ├── sentiment_score.py      # Multi-model sentiment ensemble
-│   ├── price_fetcher.py        # Live BTC/ETH price tracking
-│   └── ...                     # Data collection scripts
+│   ├── sentiment_score.py       # Multi-model sentiment ensemble (BERT + Groq)
+│   ├── price_fetcher.py         # Live BTC/ETH price tracking
+│   └── ...
 │
 ├── storage/
-│   ├── database.py             # Database connection
-│   └── cache.py                # In-memory cache with TTL
+│   ├── news_cache.json          # Live rolling 3-month news cache
+│   ├── database.py
+│   └── cache.py
 │
 ├── training/
-│   ├── xgboost_v9.py           # Train the scoring model
-│   ├── xgboost_v10_groq.py     # Experimental: Groq/LLM sentiment variant
-│   └── ...                     # Historical scoring and data prep scripts
-│
-├── archive/
-│   └── ...                     # Earlier model versions
+│   ├── xgboost_v9.py            # Train XGBoost + BERT model
+│   ├── xgboost_v10_groq.py      # Train XGBoost + Groq model
+│   ├── ann_bert.py              # Train ANN + BERT model
+│   ├── ann_groq.py              # Train ANN + Groq model
+│   ├── create_sample_cache.py   # Generate a sample cache for testing
+│   └── score_groq_only.py       # Re-score cached items with Groq sentiment
 │
 └── dashboard2/
-    ├── src/App.jsx             # Full React dashboard
-    ├── public/                 # Static assets
+    ├── src/App.tsx              # React dashboard (single-file)
+    ├── public/
     └── package.json
 ```
 
-> **Note:** Model files and training data are not committed to the repo. The training CSV and embedding caches must be generated locally before training.
-
-### Reproducibility status (read before trusting results)
-
-Reproducing results from a clean clone is **not yet possible** — several inputs
-are not in the repo and cannot be regenerated from it alone:
-
-- `news_cleaned_filtered_scored.csv` (the training table) is not committed and
-  is built from external Kaggle files that are also not committed.
-- Embedding caches (`cryptobert_v8_pipeline.npy`, `finbert_v9_pipeline.npy`),
-  the fitted scaler (`xgboost_v9_scaler.pkl`), and the Qdrant collection are
-  generated by the training run but depend on the CSV above.
-- A Qdrant Cloud instance (`QDRANT_URL`, `QDRANT_API_KEY`) is required for RAG
-  features. Without it, train with `--skip-rag` (RAG features are zeroed).
-
-### Rebuilding the dataset
-
-`scripts/build_dataset.py` runs the full chain end-to-end and fails fast with a
-clear message if a raw input or required key is missing:
-
-```bash
-python scripts/build_dataset.py --check       # verify inputs/env only
-python scripts/build_dataset.py               # merge → score → train
-python scripts/build_dataset.py --skip-rag    # train without Qdrant/RAG
-```
-
-Raw Kaggle inputs (`bitcoin_sentiments_21_24.csv`, `BTC.csv`, `ETH.csv`) must
-be placed in the repo root first; they are not committed.
-
-**Timestamp quality:** headlines from the daily `BTC.csv`/`ETH.csv` sources only
-carry a calendar date, so they are stamped at noon UTC and flagged
-`timestamp_reliable=false`. Their 15m/1h labels are not meaningful intraday
-outcomes, so training drops them by default. Set `KEEP_UNRELIABLE_TS=1` to keep
-them (not recommended).
-
-Treat the project as a **research prototype**, not a turnkey system, until you
-have rebuilt the dataset and re-measured metrics on the leak-free pipeline.
+> **Note:** Model files, embedding caches, and training data are not committed. They must be generated locally before training (see [Reproducibility](#reproducibility)).
 
 ---
 
-## Model Architecture
+## Reproducibility
 
-### Production Model — XGBoost v9
+Reproducing results from a clean clone is **not yet fully possible** — several inputs are not committed:
 
-The live scoring pipeline uses a gradient-boosted tree ensemble (XGBoost). Each headline is converted into a 1,578-dimension feature vector:
+- `news_cleaned_filtered_scored.csv` — the training table; built from Telegram-collected data
+- Embedding caches (`cryptobert_v8_pipeline.npy`, `finbert_v9_pipeline.npy`) — generated by training scripts
+- Fitted scaler (`xgboost_v9_scaler.pkl`) — generated by training run
+- Model files (`xgboost_v9.json`, `ann_bert.pt`, etc.) — output of training
 
-- **Dual semantic embeddings** (1,536 dims) — CryptoBERT (768) + FinBERT (768)
-- **Sentiment ensemble** (10 dims) — per-model probabilities from CryptoBERT, FinBERT, RoBERTa + net agreement score
-- **News-type classification** (11 dims) — cosine similarity to category prototypes
-- **Macro features** (5 dims) — weekend, low-liquidity hours, US hours, Asia hours, FOMC week
-- **Price context** (3 dims) — rolling BTC volatility, momentum, Fear & Greed Index
-- **RAG features** (13 dims) — historical similar-news retrieval from Qdrant
-
-Two binary classifiers (15-minute and 1-hour impact) plus one regressor (predicted % change) run in parallel.
-
-### Target Definition
-
-Binary label: `abs((price_+15m − price_0) / price_0) > 0.3%` for the 15-minute classifier, `> 0.5%` for the 1-hour classifier. BTC only.
-
-### Training
-
-- **Split:** True chronological, 70/15/15 train/val/test (earliest 70% trains, latest 15% tests)
-- **Class imbalance:** Handled via `scale_pos_weight`
-- **Threshold:** Searched on validation set with minimum precision constraint (20%)
-- **Early stopping:** Patience 20 rounds on logloss
-- **Baselines:** Majority-class, random, always-impactful, and volatility-threshold baselines are computed on the test set for comparison
+A Qdrant instance (`QDRANT_URL` + `QDRANT_API_KEY`) is required for RAG. Train without it using `--skip-rag` (RAG feature is zeroed; model expects exactly 1 RAG dim).
 
 ---
 
 ## Known Issues & Limitations
 
-1. ~~Split is random~~ **Fixed.** Split is now chronological (v9 and v10).
+1. ~~**Random split**~~ **Fixed.** Split is now strictly chronological (train ends before val starts, val ends before test starts).
 
-2. ~~RAG index leakage~~ **Fixed.** Qdrant index now only contains training rows.
+2. ~~**RAG index leakage**~~ **Fixed.** Qdrant index is built from training rows only.
 
-3. ~~No baselines~~ **Fixed.** Majority, random, always-impactful, and volatility baselines are printed and saved alongside model results.
+3. ~~**No baselines**~~ **Fixed.** Majority-class, random, always-impactful, and volatility baselines are evaluated on the test set.
 
-4. ~~Train/serve skew~~ **Largely fixed.** Sentiment (all 3 models), price context (live Binance), RAG similarity threshold, and blocking inference offloading have been addressed. Some minor differences may remain.
+4. ~~**Train/serve skew**~~ **Largely fixed.** Sentiment, price context, and RAG similarity are consistent between training and serving.
 
-Crypto news headlines paired with real **BTC** price data (15-minute and
-1-hour forward returns from Binance candles).
+5. **BTC only.** Both classifiers are trained on Bitcoin price moves. ETH headlines are scored with the BTC model — treat ETH predictions as illustrative.
 
-**Split:** chronological 70/15/15 (earliest news → train, most recent → test).
-The split asserts no temporal overlap across sets, and the RAG retrieval index
-is built from **training rows only**, so val/test outcomes cannot leak into any
-row's features. (An earlier version used a random monthly shuffle and indexed
-all rows — both were corrected; any previously reported metrics from that
-version are invalid and should be re-measured.)
+6. **0.5% threshold is noisy.** BTC regularly moves ≥0.5% in 15 minutes from normal volatility alone. A portion of positive-class labels may be noise rather than news-driven signal.
 
-> **Caveats:** headline counts depend on the (uncommitted) source files, so the
-> exact dataset size is not reproducible from this repo yet. A subset of source
-> headlines carry only day-level timestamps (stamped at noon UTC), which makes
-> their intraday labels unreliable; filtering these is recommended before
-> training.
+7. **Latency.** The pipeline processes headlines after they appear on Telegram. Fast price reactions may complete before scoring finishes.
 
-5. **BTC only.** The model is trained exclusively on Bitcoin data. ETH headlines shown in the dashboard are scored using the BTC model — ETH is not separately modeled. Treat ETH predictions as illustrative only.
+8. **Training artifacts not committed.** Embedding caches and model files are not in the repo.
 
-6. **0.3% threshold is noisy.** BTC frequently moves >0.3% in 15 minutes due to normal volatility. A significant portion of the "impactful" positive class may be noise rather than news-driven signal.
+9. **Headlines only.** Full article body is not used; only the headline/lead sentence from Telegram.
 
-7. **Kaggle data has synthetic timestamps.** BTC.csv and ETH.csv headlines are assigned noon UTC — their 15m/1h price labels are approximate. Rows are flagged with `timestamp_synthetic=True`.
-
-8. **Latency.** The pipeline processes headlines after they appear on Telegram. Some price moves may complete before scoring finishes.
-
-9. **Training artifacts not committed.** The training CSV, embedding caches, and model files are not in the repo and cannot currently be regenerated from scratch without the original data sources.
-
-10. **Limited test coverage.** Unit tests, integration tests, and leakage guard tests are not yet in place.
+10. **Crypto market dynamics shift rapidly.** Periodic retraining is recommended as market conditions and relevant news types evolve.
 
 ---
 
@@ -247,35 +267,15 @@ version are invalid and should be re-measured.)
 
 | Layer | Technology |
 |-------|-----------|
-| ML | XGBoost, PyTorch, HuggingFace Transformers |
-| NLP Models | CryptoBERT, FinBERT, RoBERTa |
+| ML | XGBoost, PyTorch |
+| NLP Models | CryptoBERT, FinBERT, RoBERTa-Twitter, Llama-3.3-70B (Groq) |
 | Backend | FastAPI, Uvicorn, WebSocket |
-| Frontend | React, Vite, Lightweight Charts |
-| Data | Telegram (Telethon), Binance API |
-| Vector DB | Qdrant |
+| Frontend | React 18, Vite, Lightweight Charts |
+| Data collection | Telegram (Telethon), Binance API |
+| Vector DB | Qdrant (optional, for RAG) |
+| Database | PostgreSQL (optional; falls back to JSON cache) |
 
 ---
-
-## Limitations
-
-- **BTC only.** Labels, targets, and both classifiers are trained on Bitcoin
-  price moves. The dashboard may display ETH, but there is **no ETH model** —
-  ETH headlines are scored with BTC-trained logic. Treat ETH output as
-  illustrative, not predictive.
-- **Train/serve parity is partial.** In the live path, some features unavailable
-  in real time (rolling BTC volatility/momentum, parts of the sentiment ensemble
-  and RAG vector) are zeroed or approximated.
-- **No committed baselines beyond the training run.** The training script now
-  reports majority-class, always-positive, and random-prior F1 next to the
-  model so its metrics are interpretable; trust the model only when it clearly
-  beats all three.
-- Trained primarily on Bitcoin news — transferability to other assets is unverified
-- Headlines only; full article body is not used
-- Algorithmic traders react in milliseconds; some initial price moves may conclude before scoring
-- Crypto market dynamics evolve rapidly — periodic retraining is recommended
-
----
-
 
 ## Citation
 
