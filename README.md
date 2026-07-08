@@ -27,17 +27,17 @@ The system listens to crypto news Telegram channels in real time, passes each he
 | Impactful (1-hour, ≥0.5% BTC) | 22.8% — 17,395 items |
 | Split | Chronological 70 / 15 / 15 |
 
-**Channels:** CoinTelegraph (22,613) · The Block (11,631) · CryptoNews (10,382) · Google News (9,659) · CoinDesk (9,429) · CryptoPotato (7,565) · WatcherGuru (4,941)
+**Channels:** CoinTelegraph (22,608) · The Block (11,631) · CryptoNews (10,382) · Google News (9,659) · CoinDesk (9,429) · CryptoPotato (7,565) · WatcherGuru (4,940)
 
 **Split (chronological — no temporal leakage):**
 
 | Subset | Items | Period |
 |---|---|---|
-| Train | 53,354 | Aug 2021 → Jul 2025 |
-| Validation | 11,433 | Jul 2025 → Dec 2025 |
-| Test | 11,365 | Dec 2025 → Jul 2026 |
+| Train | 53,349 | Aug 2021 → Jul 2025 |
+| Validation | 11,432 | Jul 2025 → Dec 2025 |
+| Test | 11,433 | Dec 2025 → Jul 2026 |
 
-> Test set is 11,365 rows (68 dropped from the nominal 11,433 for missing forward prices).
+> Nominal chronological split of 76,214 (70/15/15). The test set is evaluated on 11,365 rows (68 dropped from the nominal 11,433 for missing forward prices).
 
 ---
 
@@ -97,7 +97,7 @@ Four classifiers — two architectures × two sentiment backbones:
 | Majority class (always non-impactful) | 0.000 | 81.8% | Causal baseline |
 | Random classifier | 18.1% | 70.0% | Causal baseline |
 | Always predict impactful | 30.8% | 18.2% | Causal baseline |
-| Volatility oracle | 53.5% | 68.3% | **Non-causal** — thresholds the same realized return that defines the label; upper-bound reference only |
+| Realized-return oracle | 53.5% | 68.3% | **Non-causal** — thresholds the same realized return that defines the label; upper-bound reference only |
 | **XGBoost + CryptoBERT** | **50.7%** | **76.1%** | Best causal model |
 
 ---
@@ -254,7 +254,7 @@ A Qdrant instance (`QDRANT_URL` + `QDRANT_API_KEY`) is required for RAG retrieva
 
 2. ~~**RAG index leakage**~~ **Fixed.** Qdrant index is built from training rows only; val/test rows are excluded.
 
-3. ~~**No baselines**~~ **Fixed.** Majority-class, random, always-impactful baselines and a volatility oracle reference are evaluated on the test set.
+3. ~~**No baselines**~~ **Fixed.** Majority-class, random, always-impactful baselines and a realized-return oracle reference are evaluated on the test set.
 
 4. ~~**Train/serve skew**~~ **Largely fixed.** Sentiment, price context, and RAG similarity are consistent between training and serving.
 
@@ -262,7 +262,7 @@ A Qdrant instance (`QDRANT_URL` + `QDRANT_API_KEY`) is required for RAG retrieva
 
 6. **Label noise at short horizons.** The 15-min label threshold (0.3%) is aggressive — BTC regularly moves ≥0.3% from normal intraday volatility alone. A portion of positive-class labels may be noise rather than news-driven signal.
 
-7. **Volatility oracle is not a causal baseline.** The volatility reference row in the results table thresholds the same realized return that defines the label, so it has perfect look-ahead. It is an upper-bound reference, not a comparable predictor.
+7. **Realized-return oracle is not a causal baseline.** The oracle row in the results table thresholds the same realized return that defines the label, so it has perfect look-ahead. It is an upper-bound reference, not a comparable predictor.
 
 8. **Latency.** The pipeline processes headlines after they appear on Telegram. Fast price reactions may complete before scoring finishes.
 
