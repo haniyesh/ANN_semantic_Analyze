@@ -28,8 +28,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))             # pipeline.*
 sys.path.insert(0, str(ROOT / "training"))  # sibling training scripts
 
-import torch
-import torch.nn.functional as F
 from sklearn.metrics import (
     f1_score, precision_score, recall_score, accuracy_score,
     roc_auc_score, mean_absolute_error, r2_score, confusion_matrix,
@@ -87,6 +85,8 @@ def _build_proto_matrix():
     global _proto_matrix
     if _proto_matrix is not None:
         return _proto_matrix
+    import torch
+    import torch.nn.functional as F
     from transformers import AutoTokenizer, AutoModel
     print("  Building news type prototype embeddings (one-time)...")
     tok = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
@@ -104,6 +104,8 @@ def _build_proto_matrix():
 
 
 def crypto_news_type_classify(embeddings: np.ndarray) -> np.ndarray:
+    import torch
+    import torch.nn.functional as F
     proto = _build_proto_matrix()
     emb_t = F.normalize(torch.FloatTensor(embeddings), dim=1)
     sims  = torch.mm(emb_t, proto.T)
@@ -158,6 +160,33 @@ def load_data() -> pd.DataFrame:
 # ══════════════════════════════════════════════════════════════════
 # 2. EMBEDDINGS
 # ══════════════════════════════════════════════════════════════════
+def _run_embed_worker(model_name: str, df: pd.DataFrame, cache_path: Path) -> None:
+    """Compute embeddings in a subprocess to avoid glibc tcache / PyTorch allocator conflict."""
+    import subprocess, tempfile, json
+
+    titles = df["title"].fillna("").tolist()
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(titles, f)
+        titles_path = f.name
+
+    worker = Path(__file__).parent / "embed_worker.py"
+    env = {
+        **os.environ,
+        "TOKENIZERS_PARALLELISM": "false",
+        "CUDA_VISIBLE_DEVICES": "",
+    }
+    result = subprocess.run(
+        [sys.executable, str(worker),
+         "--model", model_name,
+         "--titles", titles_path,
+         "--output", str(cache_path)],
+        env=env,
+    )
+    os.unlink(titles_path)
+    if result.returncode != 0:
+        raise RuntimeError(f"embed_worker.py exited with code {result.returncode}")
+
+
 def compute_cryptobert_embeddings(df: pd.DataFrame) -> np.ndarray:
     if CRYPTOBERT_CACHE.exists():
         emb = np.load(CRYPTOBERT_CACHE).astype(np.float32)
@@ -165,24 +194,9 @@ def compute_cryptobert_embeddings(df: pd.DataFrame) -> np.ndarray:
             print("  CryptoBERT cache hit")
             return emb
 
-    print(f"  Computing CryptoBERT embeddings for {len(df):,} rows...")
-    from transformers import AutoTokenizer, AutoModel
-    device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"  Device: {device}")
-    tokenizer = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
-    model     = AutoModel.from_pretrained("ElKulako/cryptobert").eval().to(device)
-    titles, embs = df["title"].fillna("").tolist(), []
-    with torch.no_grad():
-        for i in range(0, len(titles), 32):
-            if i % 2000 == 0:
-                print(f"    {i}/{len(titles)} ({i*100//len(titles)}%)...")
-            inputs = tokenizer(titles[i:i+32], padding=True, truncation=True,
-                               max_length=128, return_tensors="pt")
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            embs.append(model(**inputs).last_hidden_state[:, 0, :].cpu().numpy())
-    emb = np.vstack(embs).astype(np.float32)
-    np.save(CRYPTOBERT_CACHE, emb)
-    return emb
+    print(f"  Computing CryptoBERT embeddings for {len(df):,} rows (subprocess)...")
+    _run_embed_worker("ElKulako/cryptobert", df, CRYPTOBERT_CACHE)
+    return np.load(CRYPTOBERT_CACHE).astype(np.float32)
 
 
 def compute_finbert_embeddings(df: pd.DataFrame) -> np.ndarray:
@@ -192,23 +206,9 @@ def compute_finbert_embeddings(df: pd.DataFrame) -> np.ndarray:
             print("  FinBERT cache hit")
             return emb
 
-    print(f"  Computing FinBERT embeddings for {len(df):,} rows...")
-    from transformers import AutoTokenizer, AutoModel
-    device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"  Device: {device}")
-    tokenizer = AutoTokenizer.from_pretrained(FINBERT_MODEL)
-    model     = AutoModel.from_pretrained(FINBERT_MODEL).eval().to(device)
-    titles, embs = df["title"].fillna("").tolist(), []
-    with torch.no_grad():
-        for i in range(0, len(titles), 32):
-            if i % 2000 == 0:
-                print(f"    {i}/{len(titles)} ({i*100//len(titles)}%)...")
-            inputs = tokenizer(titles[i:i+32], padding=True, truncation=True,
-                               max_length=128, return_tensors="pt")
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            embs.append(model(**inputs).last_hidden_state[:, 0, :].cpu().numpy())
-    emb = np.vstack(embs).astype(np.float32)
-    np.save(FINBERT_CACHE, emb)
+    print(f"  Computing FinBERT embeddings for {len(df):,} rows (subprocess)...")
+    _run_embed_worker(FINBERT_MODEL, df, FINBERT_CACHE)
+    emb = np.load(FINBERT_CACHE).astype(np.float32)
     print(f"  FinBERT done: {emb.shape}")
     return emb
 
@@ -355,25 +355,48 @@ def build_features(df: pd.DataFrame, train_idx: np.ndarray, skip_rag: bool = Fal
 # ══════════════════════════════════════════════════════════════════
 # 5. XGBOOST MODELS
 # ══════════════════════════════════════════════════════════════════
-def train_xgboost_models(X_tr, X_vl,
+def _run_xgb_worker(feat_path: str, params_path: str | None,
+                    clf15_path: str, clf1h_path: str, reg15_path: str,
+                    preds_path: str, predict_only: bool = False) -> np.ndarray:
+    """Spawn xgb_worker.py and return the loaded predictions npz."""
+    import subprocess, os as _os
+
+    worker = Path(__file__).parent / "xgb_worker.py"
+    # Do NOT set CUDA_VISIBLE_DEVICES="" — XGBoost crashes when CUDA libs are
+    # present but devices are hidden (WSL2-specific bug). device="cpu" in params
+    # is sufficient to force CPU usage.
+    env = {k: v for k, v in _os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
+    cmd = [
+        sys.executable, str(worker),
+        "--features",  feat_path,
+        "--clf15-out", clf15_path,
+        "--clf1h-out", clf1h_path,
+        "--reg15-out", reg15_path,
+        "--preds-out", preds_path,
+    ]
+    if predict_only:
+        cmd.append("--predict-only")
+    else:
+        cmd += ["--params", params_path]
+    result = subprocess.run(cmd, env=env)
+    if result.returncode != 0:
+        raise RuntimeError(f"xgb_worker.py exited with code {result.returncode}")
+    return np.load(preds_path)
+
+
+def train_xgboost_models(X_tr, X_vl, X_te,
                           y_c15_tr, y_c15_vl,
                           y_c1h_tr, y_c1h_vl,
-                          y_r15_tr, y_r15_vl):
-    try:
-        import xgboost as xgb
-    except ImportError:
-        print("  XGBoost not found. Installing...")
-        os.system("pip install xgboost --break-system-packages -q")
-        import xgboost as xgb
+                          y_r15_tr, y_r15_vl,
+                          clf15_path, clf1h_path, reg15_path):
+    """Run XGBoost training+prediction in a subprocess to avoid WSL2 glibc crash.
 
-    print(f"\n[4/7] TRAINING XGBOOST MODELS")
+    Returns numpy arrays (p15_vl, p1h_vl, p15_te, p1h_te, r15_te, feat_imp_15m)
+    so the main process never has to import xgboost.
+    """
+    import tempfile, json as _json
 
-    neg_15 = int((y_c15_tr == 0).sum())
-    pos_15 = int((y_c15_tr == 1).sum())
-    neg_1h = int((y_c1h_tr == 0).sum())
-    pos_1h = int((y_c1h_tr == 1).sum())
-    print(f"  15m — neg: {neg_15:,}  pos: {pos_15:,}  scale_pos_weight: {neg_15/pos_15:.2f}")
-    print(f"  1h  — neg: {neg_1h:,}  pos: {pos_1h:,}  scale_pos_weight: {neg_1h/pos_1h:.2f}")
+    print(f"\n[4/7] TRAINING XGBOOST MODELS (subprocess)")
 
     base_params = dict(
         n_estimators          = 500,
@@ -385,41 +408,66 @@ def train_xgboost_models(X_tr, X_vl,
         reg_alpha             = 0.1,
         reg_lambda            = 1.0,
         random_state          = MONTHLY_SEED,
-        device                = "cuda",
-        tree_method           = "hist",
+        device                = "cpu",
+        tree_method           = "approx",
+        nthread               = 1,
         early_stopping_rounds = 20,
         eval_metric           = "logloss",
     )
 
-    print("  Training clf_15m...")
-    clf_15m = xgb.XGBClassifier(
-        **base_params,
-        objective        = "binary:logistic",
-        scale_pos_weight = neg_15 / pos_15,
-    )
-    clf_15m.fit(X_tr, y_c15_tr, eval_set=[(X_vl, y_c15_vl)], verbose=False)
-    print(f"    Best iteration: {clf_15m.best_iteration}")
+    with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
+        feat_path = f.name
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        _json.dump(base_params, f)
+        params_path = f.name
+    with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
+        preds_path = f.name
 
-    print("  Training clf_1h...")
-    clf_1h = xgb.XGBClassifier(
-        **base_params,
-        objective        = "binary:logistic",
-        scale_pos_weight = neg_1h / pos_1h,
-    )
-    clf_1h.fit(X_tr, y_c1h_tr, eval_set=[(X_vl, y_c1h_vl)], verbose=False)
-    print(f"    Best iteration: {clf_1h.best_iteration}")
+    X_tr = np.nan_to_num(X_tr, nan=0.0, posinf=0.0, neginf=0.0)
+    X_vl = np.nan_to_num(X_vl, nan=0.0, posinf=0.0, neginf=0.0)
+    X_te = np.nan_to_num(X_te, nan=0.0, posinf=0.0, neginf=0.0)
+    np.savez(feat_path,
+             X_tr=X_tr, X_vl=X_vl, X_te=X_te,
+             y_c15_tr=y_c15_tr, y_c15_vl=y_c15_vl,
+             y_c1h_tr=y_c1h_tr, y_c1h_vl=y_c1h_vl,
+             y_r15_tr=y_r15_tr, y_r15_vl=y_r15_vl)
+    print(f"  Features: {X_tr.shape} train, {X_vl.shape} val, {X_te.shape} test", flush=True)
 
-    reg_params = {k: v for k, v in base_params.items()
-                  if k not in ["scale_pos_weight", "eval_metric", "n_jobs"]}
-    reg_params["eval_metric"] = "rmse"
-    print("  Training reg_15m...")
-    reg_15m = xgb.XGBRegressor(**reg_params, objective="reg:squarederror")
-    # Correct eval set: validation features paired with validation labels.
-    # (Previously this paired X_vl with a slice of TRAIN labels, which is
-    #  meaningless and broke early-stopping for the regressor.)
-    reg_15m.fit(X_tr, y_r15_tr, eval_set=[(X_vl, y_r15_vl)], verbose=False)
+    preds = _run_xgb_worker(feat_path, params_path,
+                             clf15_path, clf1h_path, reg15_path, preds_path)
+    os.unlink(feat_path)
+    os.unlink(params_path)
+    os.unlink(preds_path)
 
-    return clf_15m, clf_1h, reg_15m
+    return (preds["p15_vl"], preds["p1h_vl"],
+            preds["p15_te"], preds["p1h_te"],
+            preds["r15_te"], preds["feat_imp_15m"])
+
+
+def load_and_predict(X_vl, X_te, clf15_path, clf1h_path, reg15_path):
+    """Load saved XGBoost models and predict in a subprocess (avoids main-process import)."""
+    import tempfile
+
+    print(f"\n[4/7] LOADING saved models + predicting (subprocess)")
+    with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
+        feat_path = f.name
+    with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
+        preds_path = f.name
+
+    X_vl = np.nan_to_num(X_vl, nan=0.0, posinf=0.0, neginf=0.0)
+    X_te = np.nan_to_num(X_te, nan=0.0, posinf=0.0, neginf=0.0)
+    # Worker only needs X_vl and X_te in predict-only mode
+    np.savez(feat_path, X_vl=X_vl, X_te=X_te)
+
+    preds = _run_xgb_worker(feat_path, None,
+                             clf15_path, clf1h_path, reg15_path, preds_path,
+                             predict_only=True)
+    os.unlink(feat_path)
+    os.unlink(preds_path)
+
+    return (preds["p15_vl"], preds["p1h_vl"],
+            preds["p15_te"], preds["p1h_te"],
+            preds["r15_te"], preds["feat_imp_15m"])
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -516,8 +564,7 @@ def print_comparison(xgb_results: dict):
         print(f"  🤝 TIE")
 
 
-def print_feature_importance(clf_15m, feat_names: list, top_n: int = 20):
-    importances = clf_15m.feature_importances_
+def print_feature_importance(importances: np.ndarray, feat_names: list, top_n: int = 20):
     pairs = sorted(zip(feat_names, importances), key=lambda x: -x[1])
     meaningful = [(n, v) for n, v in pairs if not n.startswith("cb_") and not n.startswith("fb_")]
 
@@ -644,21 +691,20 @@ def main():
     reg15_path = str(HERE / "xgb_price_reg_15m_bert.json")
 
     if args.load_only and Path(clf15_path).exists():
-        import xgboost as xgb
-        print(f"\n[4/7] LOADING saved models")
-        clf_15m = xgb.XGBClassifier(); clf_15m.load_model(clf15_path)
-        clf_1h  = xgb.XGBClassifier(); clf_1h.load_model(clf1h_path)
-        reg_15m = xgb.XGBRegressor();  reg_15m.load_model(reg15_path)
+        (p15_vl, p1h_vl,
+         p15_te, p1h_te,
+         r15_te, feat_imp_15m) = load_and_predict(
+            X_vl, X_te, clf15_path, clf1h_path, reg15_path)
     else:
-        clf_15m, clf_1h, reg_15m = train_xgboost_models(
-            X_tr, X_vl,
+        (p15_vl, p1h_vl,
+         p15_te, p1h_te,
+         r15_te, feat_imp_15m) = train_xgboost_models(
+            X_tr, X_vl, X_te,
             y_c15[tri], y_c15[vi],
             y_c1h[tri], y_c1h[vi],
             y_r15[tri], y_r15[vi],
+            clf15_path, clf1h_path, reg15_path,
         )
-        clf_15m.save_model(clf15_path)
-        clf_1h.save_model(clf1h_path)
-        reg_15m.save_model(reg15_path)
         import pickle
         scaler_path = str(HERE / "xgb_feature_scaler_bert.pkl")
         with open(scaler_path, "wb") as f:
@@ -666,17 +712,12 @@ def main():
         print(f"  Models + scaler saved → {HERE}/xgb_*")
 
     print(f"\n[5/7] THRESHOLD SEARCH (min_precision={MIN_PRECISION})")
-    p15_vl  = clf_15m.predict_proba(X_vl)[:, 1]
-    p1h_vl  = clf_1h.predict_proba(X_vl)[:, 1]
     thr_15m = find_threshold(p15_vl, y_c15[vi], "15m")
     thr_1h  = find_threshold(p1h_vl, y_c1h[vi], "1h")
 
     print(f"\n[6/7] TEST SET EVALUATION")
     print(f"{'='*65}\n  XGBoost v9 TEST RESULTS\n{'='*65}")
 
-    p15_te   = clf_15m.predict_proba(X_te)[:, 1]
-    p1h_te   = clf_1h.predict_proba(X_te)[:, 1]
-    r15_te   = reg_15m.predict(X_te)
     dir_pred = (p15_te >= 0.5).astype(int)
 
     # Save per-row test predictions for bootstrap CIs / paired significance
@@ -720,7 +761,7 @@ def main():
         json.dump(xgb_results, f, indent=2)
     print(f"\n  Saved → {XGB_RESULTS_PATH}")
 
-    print_feature_importance(clf_15m, feat_names)
+    print_feature_importance(feat_imp_15m, feat_names)
 
     print(f"\n  XGBoost 15m F1={r15['F1']:.3f} vs best baseline F1={max(b['F1'] for b in base_15.values()):.3f}")
     print(f"  XGBoost 1h  F1={r1h['F1']:.3f} vs best baseline F1={max(b['F1'] for b in base_1h.values()):.3f}")
