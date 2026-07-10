@@ -263,12 +263,12 @@ def main():
             sent = _build_sentiment(cb_probs)
 
             if args.skip_rag:
-                rag = np.zeros(1, dtype=np.float32)
+                rag = np.zeros(10, dtype=np.float32)
             else:
                 try:
                     rag = _query_rag(title, pub_ts)
                 except Exception:
-                    rag = np.zeros(1, dtype=np.float32)
+                    rag = np.zeros(10, dtype=np.float32)  # 10-dim fallback matches RAG-trained scaler
 
             features = _build_features(cb_emb, fb_emb, sent, pub_dt)
             features = np.concatenate([features, rag]).astype(np.float32)

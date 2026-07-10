@@ -29,8 +29,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))              # pipeline.*
 sys.path.insert(0, str(ROOT / "training"))   # sibling training scripts
 
-import torch
-import torch.nn.functional as F
 from sklearn.metrics import (
     f1_score, precision_score, recall_score, accuracy_score,
     roc_auc_score, mean_absolute_error, r2_score, confusion_matrix,
@@ -278,6 +276,8 @@ def _build_proto_matrix():
     global _proto_matrix
     if _proto_matrix is not None:
         return _proto_matrix
+    import torch
+    import torch.nn.functional as F
     from transformers import AutoTokenizer, AutoModel
     print("  Building news type prototype embeddings (one-time)...")
     tok = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
@@ -295,6 +295,8 @@ def _build_proto_matrix():
 
 
 def crypto_news_type_classify(embeddings: np.ndarray) -> np.ndarray:
+    import torch
+    import torch.nn.functional as F
     proto = _build_proto_matrix()
     emb_t = F.normalize(torch.FloatTensor(embeddings), dim=1)
     sims  = torch.mm(emb_t, proto.T)
@@ -346,8 +348,9 @@ def compute_cryptobert_embeddings(df: pd.DataFrame) -> np.ndarray:
             print("  CryptoBERT cache hit")
             return emb
     print(f"  Computing CryptoBERT embeddings for {len(df):,} rows...")
+    import torch
     from transformers import AutoTokenizer, AutoModel
-    device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device    = torch.device("cpu")   # CPU-only avoids WSL2 CUDA allocator crash
     tokenizer = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
     model     = AutoModel.from_pretrained("ElKulako/cryptobert").eval().to(device)
     titles, embs = df["title"].fillna("").tolist(), []
@@ -357,8 +360,7 @@ def compute_cryptobert_embeddings(df: pd.DataFrame) -> np.ndarray:
                 print(f"    {i}/{len(titles)}...")
             inputs = tokenizer(titles[i:i+32], padding=True, truncation=True,
                                max_length=128, return_tensors="pt")
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            embs.append(model(**inputs).last_hidden_state[:, 0, :].cpu().numpy())
+            embs.append(model(**inputs).last_hidden_state[:, 0, :].numpy())
     emb = np.vstack(embs).astype(np.float32)
     np.save(CRYPTOBERT_CACHE, emb)
     return emb
@@ -371,8 +373,9 @@ def compute_finbert_embeddings(df: pd.DataFrame) -> np.ndarray:
             print("  FinBERT cache hit")
             return emb
     print(f"  Computing FinBERT embeddings for {len(df):,} rows...")
+    import torch
     from transformers import AutoTokenizer, AutoModel
-    device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device    = torch.device("cpu")
     tokenizer = AutoTokenizer.from_pretrained(FINBERT_MODEL)
     model     = AutoModel.from_pretrained(FINBERT_MODEL).eval().to(device)
     titles, embs = df["title"].fillna("").tolist(), []
@@ -382,8 +385,7 @@ def compute_finbert_embeddings(df: pd.DataFrame) -> np.ndarray:
                 print(f"    {i}/{len(titles)}...")
             inputs = tokenizer(titles[i:i+32], padding=True, truncation=True,
                                max_length=128, return_tensors="pt")
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            embs.append(model(**inputs).last_hidden_state[:, 0, :].cpu().numpy())
+            embs.append(model(**inputs).last_hidden_state[:, 0, :].numpy())
     emb = np.vstack(embs).astype(np.float32)
     np.save(FINBERT_CACHE, emb)
     return emb

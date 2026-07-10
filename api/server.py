@@ -547,7 +547,7 @@ async def _prune_rate_limits():
 
 
 async def _cache_refresh_loop():
-    global all_news, hot_news, _last_cache_mtime, _idf_cache
+    global all_news, hot_news, _last_cache_mtime, _idf_cache, _combined_cache
     while True:
         await asyncio.sleep(60)
         try:
@@ -565,6 +565,7 @@ async def _cache_refresh_loop():
                         if max(abs(float(i.get("model_score", 0))),
                                abs(float(i.get("model_score_1h", 0)))) >= SCORE_HOT]
             _idf_cache = None
+            _combined_cache = None
             _last_cache_mtime = mtime
             _log.info("Cache refreshed: %d items (%d new IDs)", len(all_news), len(fresh))
             for item in fresh:
@@ -623,7 +624,7 @@ async def ingest_news(item: IngestNewsItem, x_api_key: str = Header(default=""))
     if not secrets.compare_digest(x_api_key, _INGEST_API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
 
-    global all_news, hot_news, _idf_cache
+    global all_news, hot_news, _idf_cache, _combined_cache
 
     # Convert Pydantic model to plain dict so we can freely mutate it
     data: dict = item.model_dump()
@@ -658,6 +659,7 @@ async def ingest_news(item: IngestNewsItem, x_api_key: str = Header(default=""))
            abs(float(item.get("model_score_1h", 0)))) >= SCORE_HOT:
         hot_news = ([item] + hot_news)[:MAX]
     _idf_cache = None
+    _combined_cache = None
 
     # Persist to cache file atomically — offloaded so json.dumps + disk I/O
     # don't block the event loop (O(N) work per ingest call).
@@ -700,7 +702,7 @@ async def ingest_news(item: IngestNewsItem, x_api_key: str = Header(default=""))
 def get_since(ts: int = 0):
     """Return items with published_ts > ts — for incremental frontend polling."""
     items = _gate_feed([
-        i for i in (all_news + historical_news)
+        i for i in _get_combined()
         if float(i.get("published_ts") or i.get("received_at", 0)) > ts
     ])
     return sorted(items, key=lambda x: x.get("published_ts") or 0)
@@ -768,7 +770,7 @@ def get_all(response: Response, limit: int = 500, offset: int = 0):
     request only what they render — avoid limit > 2000.
     """
     combined = _gate_feed(sorted(
-        all_news + historical_news,
+        _get_combined(),
         key=lambda x: x.get("published_ts") or x.get("received_at") or 0,
         reverse=True,
     ))
@@ -781,14 +783,14 @@ def get_all(response: Response, limit: int = 500, offset: int = 0):
 
 @app.get("/news/hot")
 def get_hot():
-    return [{**i, "impact": _recompute_impact(i)} for i in hot_news[-50:]]
+    return [{**i, "impact": _recompute_impact(i)} for i in hot_news[:50]]
 
 
 @app.get("/news/dates")
 def get_dates():
     from datetime import datetime, timezone
     seen = set()
-    for item in all_news + historical_dates_index:
+    for item in all_news + historical_dates_index:  # dates index kept separate (slim dicts)
         ts = item.get("published_ts") or item.get("received_at")
         if ts:
             d = datetime.fromtimestamp(float(ts), tz=timezone.utc)
@@ -799,7 +801,7 @@ def get_dates():
 @app.get("/news/by-date")
 def get_by_date(start: int, end: int):
     return _gate_feed([
-        item for item in all_news + historical_dates_index
+        item for item in all_news + historical_dates_index  # dates index kept separate
         if start <= float(item.get("published_ts") or item.get("received_at", 0)) <= end
     ])
 
@@ -1087,19 +1089,25 @@ def get_report_summary():
     # Derive metrics from the results JSON — never hardcode them here.
     _r15 = model_results.get("15_minute", {})
     _r1h = model_results.get("1_hour", {})
+    _src = results_path.name if results_path.exists() else "not found"
+    _is_bert = "bert" in _src
     architecture = {
-        "name":       "XGBoost v10 (DualBERT + Groq/Llama-3.3-70B Sentiment)",
-        "type":       "Gradient Boosted Trees — GPU (device=cuda, tree_method=hist)",
-        "file":       "xgboost_train_groq.py",
-        "results_source": str(results_path.name) if results_path.exists() else "not found",
-        "feature_dim": 1562,
+        "name":       ("XGBoost (DualBERT + 3-BERT Ensemble Sentiment + RAG)"
+                       if _is_bert else
+                       "XGBoost (DualBERT + Groq/Llama-3.3-70B Sentiment + RAG)"),
+        "type":       "Gradient Boosted Trees — CPU (device=cpu, tree_method=approx)",
+        "file":       "xgboost_train_bert.py" if _is_bert else "xgboost_train_groq.py",
+        "results_source": _src,
+        "feature_dim": model_results.get("feature_dim",
+                        1578 if _is_bert else 1562),
         "feature_layout": [
             {"name": "CryptoBERT embedding",    "dims": 768},
             {"name": "FinBERT embedding",        "dims": 768},
-            {"name": "Groq/Llama-3.3-70B sentiment (3 one-hot + 3 scalar)", "dims": 6},
+            {"name": "3-BERT ensemble sentiment (9 probs + net_agreement + 3 scalar)" if _is_bert
+                     else "Groq/Llama-3.3-70B sentiment (3 one-hot + 3 scalar)", "dims": 13 if _is_bert else 6},
             {"name": "News-type probs",          "dims": 11},
             {"name": "Macro timing (5) + price context (3)", "dims": 8},
-            {"name": "RAG features",             "dims": 1},
+            {"name": "RAG features (Qdrant macro-reweighted)", "dims": 10},
         ],
         "embeddings": ["ElKulako/cryptobert (768)", "ProsusAI/finbert (768)"],
         "price_context": ["btc_vol (rolling std 20)", "btc_mom (rolling mean 5)", "fear_greed (Alternative.me)"],
@@ -1176,8 +1184,9 @@ _STOP = {
     "the","and","for","are","was","not","but","with","its","has","had",
     "have","will","from","that","this","into","than","more","over","about",
     "after","before","says","said","new","now","get","can","all","one","top",
-    "just","also","amid","amid","amid","per","via","out","off",
+    "just","also","amid","per","via","out","off",
 }
+_SIM_THRESHOLD = 0.12  # minimum cosine similarity for /news/similar results
 
 def _tokens(text: str) -> List[str]:
     return [w for w in re.findall(r"[a-z]{3,}", text.lower()) if w not in _STOP]
@@ -1202,11 +1211,19 @@ def _build_idf(items: List[dict]) -> dict:
 
 # IDF is built lazily on first call so startup isn't delayed
 _idf_cache: dict | None = None
+_combined_cache: list | None = None  # cached all_news + historical_news
+
+
+def _get_combined() -> list:
+    global _combined_cache
+    if _combined_cache is None:
+        _combined_cache = all_news + historical_news
+    return _combined_cache
 
 def _get_idf() -> dict:
     global _idf_cache
     if _idf_cache is None:
-        _idf_cache = _build_idf(all_news + historical_news)
+        _idf_cache = _build_idf(_get_combined())
     return _idf_cache
 
 
@@ -1227,14 +1244,14 @@ async def find_similar(request: Request, item: SimilarRequest):
         return {"similar": []}
     q_vec = _tfidf_vec(q_tokens, idf)
 
-    pool    = (all_news + historical_news)
+    pool    = _get_combined()
     results = []
     for n in pool:
         t = (n.get("title") or "").strip()
         if not t or t == title:
             continue
         sim = _cosine(q_vec, _tfidf_vec(_tokens(t), idf))
-        if sim >= 0.12:
+        if sim >= _SIM_THRESHOLD:
             results.append({
                 "title":  t,
                 "sim":    round(sim, 3),
@@ -1506,9 +1523,27 @@ def _analyze_custom_sync(title: str) -> dict:
             fb_pos = fb_neg = rb_pos = rb_neg = 0.0
 
         pub_dt = datetime.now(tz=_tz.utc)
+        now_ts = int(pub_dt.timestamp())
+
+        # RAG query must happen BEFORE feature concatenation so the 10-dim
+        # RAG vector is included in the 1578-dim feature vector the scaler
+        # and model were trained on.  Falls back to zeros on Qdrant errors.
+        similar = []
+        rag_feats = np.zeros(10, dtype=np.float32)
+        try:
+            from pipeline.rag_news import query_single
+            rag_result = query_single(title=title, before_timestamp=now_ts,
+                                      channel_impact_rates={}, macro_now=None)
+            rag_feats = rag_result["features"].astype(np.float32)
+            similar = [
+                {"title": s.get("title",""), "change": s.get("btc_change_15m", 0.0), "sim": s.get("similarity_score", 0.0)}
+                for s in rag_result.get("similar_news", [])[:3]
+            ]
+        except Exception:
+            pass
+
         features = _build_features(cb_emb, fb_emb, sent, pub_dt)
-        rag_zeros = np.zeros(1, dtype=np.float32)
-        features  = np.concatenate([features, rag_zeros]).astype(np.float32)
+        features  = np.concatenate([features, rag_feats]).astype(np.float32)
 
         X    = scaler.transform(features.reshape(1, -1)).astype(np.float32)
         p15  = float(clf15.predict_proba(X)[0, 1])
@@ -1522,23 +1557,6 @@ def _analyze_custom_sync(title: str) -> dict:
         TYPE_LABELS = ["regulatory","partnership","product","hack_security","market_move",
                        "macro","adoption","exchange","defi","nft","other"]
         top_type = TYPE_LABELS[int(np.argmax(type_probs))]
-
-        # RAG — find similar past news
-        similar = []
-        try:
-            from pipeline.rag_news import query_single
-            now_ts = int(pub_dt.timestamp())
-            rag_result = query_single(title=title, before_timestamp=now_ts,
-                                      channel_impact_rates={}, macro_now={})
-            similar = [
-                {"title": s.get("title",""), "change": s.get("btc_change_15m", 0.0), "sim": s.get("similarity_score", 0.0)}
-                for s in rag_result.get("similar_news", [])[:3]
-            ]
-            # Model was trained in skip-RAG mode (RAG dim = np.zeros(1)).
-            # rag_result["features"] is 10-dim; concatenating it would produce
-            # 1578-dim and break the scaler. Use similar_news for display only.
-        except Exception:
-            pass
 
         # Explanation with per-model breakdown
         sent_word = "bullish" if sent["sentiment"] == "positive" else ("bearish" if sent["sentiment"] == "negative" else "neutral")
