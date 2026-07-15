@@ -121,6 +121,37 @@ def test_production_artifact_manifest_checksums():
         )
 
 
+def test_all_direct_dependencies_are_exactly_locked():
+    """Prevent floating dependency ranges from returning to production or CI."""
+    for filename in ("requirements.txt", "requirements-dev.txt"):
+        for raw in (ROOT / filename).read_text(encoding="utf-8").splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if not line or line.startswith("-r "):
+                continue
+            assert "==" in line, f"Unpinned dependency in {filename}: {line}"
+            assert not any(op in line for op in (">=", "<=", "~=", "!=", "<", ">")), (
+                f"Version range in {filename}: {line}"
+            )
+
+
+def test_custom_analyzer_auth_fails_closed_before_inference():
+    from unittest.mock import patch
+    import pytest
+    from fastapi import HTTPException
+    import api.server as srv
+
+    with patch.object(srv, "_ANALYZE_API_KEY", ""):
+        with pytest.raises(HTTPException) as disabled:
+            srv._require_analyze_key("anything")
+        assert disabled.value.status_code == 503
+
+    with patch.object(srv, "_ANALYZE_API_KEY", "expected-secret"):
+        with pytest.raises(HTTPException) as unauthorized:
+            srv._require_analyze_key("wrong-secret")
+        assert unauthorized.value.status_code == 401
+        assert srv._require_analyze_key("expected-secret") is None
+
+
 # ── 3. Feature dimension contract ─────────────────────────────────────────────
 
 def test_build_xgb_features_dimension():

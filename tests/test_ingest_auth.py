@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 
 # Minimal env so server.py imports without crashing on missing vars
 os.environ.setdefault("INGEST_API_KEY", "test-secret-key-abc123")
+os.environ.setdefault("ANALYZE_API_KEY", "test-analyze-key-abc123")
 os.environ.setdefault("LOG_LEVEL", "WARNING")   # quieten startup logs in tests
 
 
@@ -31,7 +32,8 @@ def client():
                     with patch.object(srv, "hot_news", []):
                         # Pin the ingest key to a known test value regardless of .env
                         with patch.object(srv, "_INGEST_API_KEY", "test-secret-key-abc123"):
-                            yield TestClient(srv.app)
+                            with patch.object(srv, "_ANALYZE_API_KEY", "test-analyze-key-abc123"):
+                                yield TestClient(srv.app)
 
 
 VALID_ITEM = {
@@ -109,6 +111,35 @@ def test_analyze_custom_rejects_empty_title(client):
     resp = client.post("/analyze/custom", json={"title": ""},
                        headers={"X-API-Key": "test-secret-key-abc123"})
     assert resp.status_code == 422
+
+
+def test_analyze_custom_rejects_missing_key(client):
+    """A valid request must not reach expensive inference without authentication."""
+    resp = client.post(
+        "/analyze/custom",
+        json={"title": "SEC approves a new Bitcoin exchange traded fund"},
+    )
+    assert resp.status_code == 401
+
+
+def test_analyze_custom_rejects_wrong_key(client):
+    resp = client.post(
+        "/analyze/custom",
+        json={"title": "SEC approves a new Bitcoin exchange traded fund"},
+        headers={"X-Analyze-Key": "wrong-key"},
+    )
+    assert resp.status_code == 401
+
+
+def test_analyze_custom_fails_closed_without_config(client):
+    import api.server as srv
+    with patch.object(srv, "_ANALYZE_API_KEY", ""):
+        resp = client.post(
+            "/analyze/custom",
+            json={"title": "SEC approves a new Bitcoin exchange traded fund"},
+            headers={"X-Analyze-Key": "test-analyze-key-abc123"},
+        )
+    assert resp.status_code == 503
 
 
 def test_news_all_returns_list(client):

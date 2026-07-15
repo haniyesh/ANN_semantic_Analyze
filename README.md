@@ -133,7 +133,8 @@ A React dashboard that connects to the backend via WebSocket and REST.
 ```bash
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt
 ```
 
 Copy `.env.example` to `.env` and fill in credentials:
@@ -147,11 +148,16 @@ BOT_TOKEN=...                    # Telegram bot token
 GROQ_API_KEY=...                 # Primary Groq key (Llama-3.3-70B sentiment)
 GROQ_API_KEY_2=...               # Optional second key for rotation
 INGEST_API_KEY=...               # Shared secret: POST /news (bot → API)
+ANALYZE_API_KEY=...              # Server-side secret: POST /analyze/custom
 ALLOWED_ORIGINS=http://localhost:5173
 DATABASE_URL=...                 # Optional PostgreSQL; runs in cache-only mode without it
 ```
 
 > `INGEST_API_KEY` must be set identically in `.env` for both `main.py` and `server.py`. Without it, `POST /news` returns `503` (fails closed).
+
+`POST /analyze/custom` also fails closed unless `ANALYZE_API_KEY` is configured
+and supplied in the `X-Analyze-Key` header. Do not expose this key in the Vite
+bundle; route browser access through an authenticated server-side proxy.
 
 ### 1. Start the API server
 

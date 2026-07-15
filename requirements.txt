@@ -1,41 +1,41 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Python dependencies. Lower bounds are pinned for reproducibility; tighten to
-# exact == versions before a production deploy (pip freeze > requirements.lock).
+# Direct Python dependencies are exactly pinned for reproducible production
+# builds. Update deliberately and run the full contract + Docker smoke tests.
 # Node/frontend deps live in dashboard2/package.json, NOT here.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── ML / NLP ─────────────────────────────────────────────────────────────────
 # torch CPU wheels: install with
 #   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
-torch>=2.2,<3
-transformers>=4.40,<5
+torch==2.2.2
+transformers==4.40.2
 # Production artifact xgb_impact_clf_15m_bert_rag.json was written by 3.2.0.
 # Loading it with XGBoost 2.x is not a supported deployment contract.
 xgboost==3.2.0
-scikit-learn>=1.4,<2
-numpy>=1.26,<2
-pandas>=2.1,<3
-fastembed>=0.3,<1
-optuna>=3.6,<4
-tqdm>=4.66
+scikit-learn==1.4.2
+numpy==1.26.4
+pandas==2.2.2
+fastembed==0.3.6
+optuna==3.6.1
+tqdm==4.66.4
 
 # ── Backend / API ────────────────────────────────────────────────────────────
-fastapi>=0.110,<1
-uvicorn[standard]>=0.29,<1
-httpx>=0.27,<1
-aiohttp>=3.9,<4
-requests>=2.31,<3
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+httpx==0.27.0
+aiohttp==3.9.5
+requests==2.32.3
 
 # ── Data stores ──────────────────────────────────────────────────────────────
-asyncpg>=0.29,<1
-qdrant-client>=1.9,<2
+asyncpg==0.29.0
+qdrant-client==1.9.1
 
 # ── Telegram ─────────────────────────────────────────────────────────────────
-telethon>=1.34,<2            # user-session listener (bot/telegram_listener.py)
-python-telegram-bot>=20,<22  # bot alerts (main.py → post_hot_to_telegram)
+telethon==1.35.0            # user-session listener (bot/telegram_listener.py)
+python-telegram-bot==21.2   # bot alerts (main.py → post_hot_to_telegram)
 
 # ── LLM ──────────────────────────────────────────────────────────────────────
-groq>=0.9,<1
+groq==0.9.0
 
 # ── Utils ────────────────────────────────────────────────────────────────────
-python-dotenv>=1.0,<2
+python-dotenv==1.0.1

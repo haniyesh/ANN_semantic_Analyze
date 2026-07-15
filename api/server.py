@@ -610,6 +610,18 @@ async def ws_hot(ws: WebSocket):
 
 # ── REST — news ────────────────────────────────────────────────────
 _INGEST_API_KEY = os.getenv("INGEST_API_KEY", "")
+_ANALYZE_API_KEY = os.getenv("ANALYZE_API_KEY", "")
+
+
+def _require_analyze_key(provided_key: str) -> None:
+    """Fail closed before rate limiting or expensive model initialization."""
+    if not _ANALYZE_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Custom analyzer disabled: ANALYZE_API_KEY not configured",
+        )
+    if not secrets.compare_digest(provided_key, _ANALYZE_API_KEY):
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Analyze-Key")
 
 
 @app.post("/news")
@@ -1731,7 +1743,12 @@ def _analyze_custom_sync(title: str) -> dict:
 
 
 @app.post("/analyze/custom")
-async def analyze_custom(request: Request, body: AnalyzeRequest):
+async def analyze_custom(
+    request: Request,
+    body: AnalyzeRequest,
+    x_analyze_key: str = Header(default=""),
+):
+    _require_analyze_key(x_analyze_key)
     _check_rate_limit(_client_ip(request), rpm=20)
     try:
         await asyncio.wait_for(_analyze_semaphore.acquire(), timeout=0.1)
