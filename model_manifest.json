@@ -1,0 +1,26 @@
+{
+  "deployment": "15-minute XGBoost DualBERT with RAG",
+  "model": {
+    "path": "xgb_impact_clf_15m_bert_rag.json",
+    "sha256": "0bb6889b22523170b7d3ad0cd03b110f653ff4907aaebdde7f18d5b606ee077e",
+    "xgboost_version": "3.2.0"
+  },
+  "scaler": {
+    "path": "xgb_feature_scaler_bert_rag.pkl",
+    "sha256": "91fa12720b38999e891e8ed401cb5ec535dfe14e2d3d628ec36d78100bb7a494"
+  },
+  "feature_contract": {
+    "path": "pipeline/feature_contract.py",
+    "total_dimensions": 1578,
+    "rag_dimensions": 10
+  },
+  "evaluation": {
+    "path": "xgb_bert_rag_results.json",
+    "threshold_15m": 0.51
+  },
+  "provenance": {
+    "packaged_on": "2026-07-15",
+    "base_git_commit": "5432b16",
+    "training_dataset": "not recorded; add immutable dataset ID on next training run"
+  }
+}

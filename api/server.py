@@ -97,14 +97,15 @@ RATE_LIMIT_RPM = 60  # requests per minute per IP for expensive endpoints
 def _news_id(channel: str, title: str, published_ts: int) -> str:
     """Deterministic, collision-resistant news ID stable across restarts.
 
-    Uses the first 16 hex chars of SHA-1 over channel|title|published_ts.
+    Uses the first 32 hex chars of SHA-1 over channel|title|published_ts so the
+    value can also be converted to the UUID used by the Qdrant live index.
     SHA-1 is fine here — this is a content-address, not a security hash.
     Avoids: Python hash() salt (different every restart), published_ts*1000
     collisions (two headlines in the same second share an ID).
     """
     import hashlib
     raw = f"{channel}|{title}|{published_ts}"
-    return hashlib.sha1(raw.encode()).hexdigest()[:16]
+    return hashlib.sha1(raw.encode()).hexdigest()[:32]
 
 
 # Only honor X-Forwarded-For when running behind a trusted reverse proxy that
@@ -164,7 +165,7 @@ def _passes_noise_filter(item: dict) -> bool:
     return _passes_news_filter(item.get("title", ""), item.get("channel", ""))
 
 # Impact / gate thresholds — imported from config.py (single source of truth).
-# Applied to max(model_score, model_score_1h). Confidence is in 0–100 units here.
+# Applied to the production 15-minute model_score. Confidence is 0–100 here.
 SCORE_HOT  = SCORE_THRESHOLD_HOT       # 0.80
 SCORE_MED  = SCORE_THRESHOLD_MEDIUM    # 0.55
 SCORE_SHOW = SCORE_THRESHOLD_SHOW      # 0.30
@@ -172,24 +173,20 @@ SCORE_HIGH = SCORE_HOT                 # alias used in hot_news / explain endpoi
 CONF_MIN   = CONF_SHOW * 100           # config is 0–1; server compares against 0–100 confidence
 
 
-def _max_score(item: dict) -> float:
-    """max(|model_score|, |model_score_1h|) — the value all gates use."""
-    return max(abs(float(item.get("model_score", 0) or 0)),
-               abs(float(item.get("model_score_1h", 0) or 0)))
+def _live_score(item: dict) -> float:
+    """Absolute production 15-minute score used by every live gate."""
+    return abs(float(item.get("model_score", 0) or 0))
 
 
 def _recompute_impact(item: dict) -> str:
     """Impact badge recomputed live from scores — single source of truth is config.impact_tier().
     Vocabulary: Hot | Medium | Show | Low"""
-    return _config_impact_tier(
-        item.get("model_score", 0) or 0,
-        item.get("model_score_1h", 0) or 0,
-    )
+    return _config_impact_tier(item.get("model_score", 0) or 0)
 
 
 def _passes_display(item: dict) -> bool:
     """Display gate: confidence >= CONF_MIN. Score gate uses SCORE_SHOW for feed."""
-    return float(item.get("confidence", 0) or 0) >= CONF_MIN and _max_score(item) >= SCORE_SHOW
+    return float(item.get("confidence", 0) or 0) >= CONF_MIN and _live_score(item) >= SCORE_SHOW
 
 
 def _gate_feed(items: list) -> list:
@@ -242,11 +239,10 @@ def _load_cache() -> List[dict]:
 
 all_news: List[dict] = _load_cache()
 
-# Hot = max(score_15m, score_1h) >= SCORE_HOT (0.80)
+# Hot is determined only by the deployed 15-minute score.
 hot_news: List[dict] = [
     item for item in all_news
-    if max(abs(float(item.get("model_score", 0))),
-           abs(float(item.get("model_score_1h", 0)))) >= SCORE_HOT
+    if _live_score(item) >= SCORE_HOT
 ]
 
 _log.info("Loaded %d news items from cache  (%d hot)", len(all_news), len(hot_news))
@@ -494,9 +490,16 @@ from contextlib import asynccontextmanager
 async def lifespan(_):
     global _last_cache_mtime
     _last_cache_mtime = CACHE_FILE.stat().st_mtime if CACHE_FILE.exists() else 0.0
-    asyncio.create_task(_cache_refresh_loop())
-    asyncio.create_task(_prune_rate_limits())
-    yield
+    tasks = [
+        asyncio.create_task(_cache_refresh_loop(), name="cache-refresh"),
+        asyncio.create_task(_prune_rate_limits(), name="rate-limit-pruner"),
+    ]
+    try:
+        yield
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 # ── App setup ─────────────────────────────────────────────────────
 app = FastAPI(title="Crypto News API", version="2.0", lifespan=lifespan)
@@ -534,6 +537,8 @@ async def _broadcast(clients: set, item: dict):
 
 # ── Background cache refresh ──────────────────────────────────────
 _last_cache_mtime: float = 0.0
+_cache_write_lock = asyncio.Lock()
+_cache_write_version = 0
 
 async def _prune_rate_limits():
     """Periodically remove stale IP entries to bound _rate_limits memory."""
@@ -561,17 +566,14 @@ async def _cache_refresh_loop():
             fresh = [i for i in new_items if i.get("id") not in existing_ids]
             # Always reload when file changed — rescoring produces same IDs with updated scores
             all_news = new_items
-            hot_news = [i for i in all_news
-                        if max(abs(float(i.get("model_score", 0))),
-                               abs(float(i.get("model_score_1h", 0)))) >= SCORE_HOT]
+            hot_news = [i for i in all_news if _live_score(i) >= SCORE_HOT]
             _idf_cache = None
             _combined_cache = None
             _last_cache_mtime = mtime
             _log.info("Cache refreshed: %d items (%d new IDs)", len(all_news), len(fresh))
             for item in fresh:
                 await _broadcast(_ws_all_clients, item)
-                if max(abs(float(item.get("model_score", 0))),
-                       abs(float(item.get("model_score_1h", 0)))) >= SCORE_HOT:
+                if _live_score(item) >= SCORE_HOT:
                     await _broadcast(_ws_hot_clients, item)
         except Exception as exc:
             _log.error("Cache refresh error: %s", exc)
@@ -624,7 +626,7 @@ async def ingest_news(item: IngestNewsItem, x_api_key: str = Header(default=""))
     if not secrets.compare_digest(x_api_key, _INGEST_API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
 
-    global all_news, hot_news, _idf_cache, _combined_cache
+    global all_news, hot_news, _idf_cache, _combined_cache, _cache_write_version
 
     # Convert Pydantic model to plain dict so we can freely mutate it
     data: dict = item.model_dump()
@@ -644,6 +646,10 @@ async def ingest_news(item: IngestNewsItem, x_api_key: str = Header(default=""))
     # Ensure published_ts exists (id is now a hex string, not a numeric timestamp)
     if not data.get("published_ts"):
         data["published_ts"] = int(time.time())
+    if not data.get("id"):
+        data["id"] = _news_id(
+            data.get("channel", ""), data["title"], int(data["published_ts"])
+        )
 
     item = data   # type: ignore[assignment]  — work with the dict from here on
 
@@ -655,8 +661,7 @@ async def ingest_news(item: IngestNewsItem, x_api_key: str = Header(default=""))
     # Prepend to in-memory list and trim to MAX_CACHE_ITEMS
     MAX = 10_000
     all_news = ([item] + all_news)[:MAX]
-    if max(abs(float(item.get("model_score", 0))),
-           abs(float(item.get("model_score_1h", 0)))) >= SCORE_HOT:
+    if _live_score(item) >= SCORE_HOT:
         hot_news = ([item] + hot_news)[:MAX]
     _idf_cache = None
     _combined_cache = None
@@ -664,35 +669,31 @@ async def ingest_news(item: IngestNewsItem, x_api_key: str = Header(default=""))
     # Persist to cache file atomically — offloaded so json.dumps + disk I/O
     # don't block the event loop (O(N) work per ingest call).
     _snapshot = list(all_news)
+    _cache_write_version += 1
+    write_version = _cache_write_version
     async def _write_cache():
         global _last_cache_mtime
-        try:
-            def _do_write():
-                tmp = CACHE_FILE.with_suffix(".tmp")
-                tmp.write_text(json.dumps(_snapshot, default=str), encoding="utf-8")
-                tmp.replace(CACHE_FILE)
-                return CACHE_FILE.stat().st_mtime
-            mtime = await asyncio.to_thread(_do_write)
-            _last_cache_mtime = mtime
-        except Exception as e:
-            _log.error("Cache write failed: %s", e)
-    asyncio.create_task(_write_cache())
-
-    # Index to Qdrant for future RAG retrieval (fire-and-forget; Qdrant is optional)
-    if item.get("id"):
-        _item_snap = dict(item)
-        async def _index_qdrant():
+        async with _cache_write_lock:
+            # A newer request already captured a more complete snapshot.
+            if write_version != _cache_write_version:
+                return
             try:
-                from pipeline.rag_news import index_live_news
-                await asyncio.to_thread(index_live_news, _item_snap)
-            except Exception as _e:
-                _log.warning("Qdrant live index failed: %s", _e)
-        asyncio.create_task(_index_qdrant())
+                def _do_write():
+                    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = CACHE_FILE.with_suffix(".tmp")
+                    tmp.write_text(json.dumps(_snapshot, default=str), encoding="utf-8")
+                    tmp.replace(CACHE_FILE)
+                    return CACHE_FILE.stat().st_mtime
+                mtime = await asyncio.to_thread(_do_write)
+                _last_cache_mtime = mtime
+            except Exception as e:
+                _log.error("Cache write failed: %s", e)
+                raise HTTPException(status_code=500, detail="Failed to persist news") from e
+    await _write_cache()
 
     # Broadcast to WebSocket clients
     await _broadcast(_ws_all_clients, item)
-    if max(abs(float(item.get("model_score", 0))),
-           abs(float(item.get("model_score_1h", 0)))) >= SCORE_HOT:
+    if _live_score(item) >= SCORE_HOT:
         await _broadcast(_ws_hot_clients, item)
 
     return {"status": "ok"}
@@ -749,10 +750,90 @@ def get_config():
     }
 
 
+_artifact_health_cache: dict | None = None
+
+
+def _artifact_health() -> dict:
+    global _artifact_health_cache
+    if _artifact_health_cache is not None:
+        return _artifact_health_cache
+
+    model_path = ROOT / "xgb_impact_clf_15m_bert_rag.json"
+    scaler_path = ROOT / "xgb_feature_scaler_bert_rag.pkl"
+    result = {
+        "ready": False,
+        "expected_features": 1578,
+        "model_features": None,
+        "scaler_features": None,
+        "error": None,
+    }
+    try:
+        model_json = json.loads(model_path.read_text(encoding="utf-8"))
+        result["model_features"] = int(
+            model_json["learner"]["learner_model_param"]["num_feature"]
+        )
+        import pickle
+        with scaler_path.open("rb") as f:
+            scaler = pickle.load(f)
+        result["scaler_features"] = int(scaler.n_features_in_)
+        result["ready"] = (
+            result["model_features"]
+            == result["scaler_features"]
+            == result["expected_features"]
+        )
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+    _artifact_health_cache = result
+    return result
+
+
 @app.get("/health")
-def health():
+def health(response: Response):
+    artifacts = _artifact_health()
+    if not artifacts["ready"]:
+        response.status_code = 503
+    pending_path = ROOT / "storage" / "rag_pending_outcomes.json"
+    dead_path = ROOT / "storage" / "rag_dead_letter.json"
+    bot_health_path = ROOT / "storage" / "bot_health.json"
+    try:
+        pending = json.loads(pending_path.read_text(encoding="utf-8")) if pending_path.exists() else []
+        if not isinstance(pending, list):
+            pending = []
+        pending_count = len(pending)
+        oldest_pending_age = (
+            max(0, int(time.time()) - min(int(i.get("published_ts", time.time())) for i in pending))
+            if pending else 0
+        )
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        pending_count = None
+        oldest_pending_age = None
+    try:
+        dead = json.loads(dead_path.read_text(encoding="utf-8")) if dead_path.exists() else []
+        dead_count = len(dead) if isinstance(dead, list) else 0
+    except (OSError, json.JSONDecodeError):
+        dead_count = None
+    try:
+        bot_health = json.loads(bot_health_path.read_text(encoding="utf-8")) \
+            if bot_health_path.exists() else None
+        bot_heartbeat_age = (
+            max(0, int(time.time()) - int(bot_health.get("timestamp", 0)))
+            if isinstance(bot_health, dict) else None
+        )
+        bot_status = "ok" if bot_heartbeat_age is not None and bot_heartbeat_age <= 90 else "stale"
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        bot_health = None
+        bot_heartbeat_age = None
+        bot_status = "unknown"
+
     return {
-        "status":              "ok",
+        "status":              "ok" if artifacts["ready"] else "degraded",
+        "model":               artifacts,
+        "rag_pending_outcomes": pending_count,
+        "rag_oldest_pending_seconds": oldest_pending_age,
+        "rag_dead_letter_count": dead_count,
+        "bot_status":           bot_status,
+        "bot_heartbeat_age_seconds": bot_heartbeat_age,
+        "bot":                  bot_health,
         "source":              "news_cache.json + news_cleaned_filtered.csv",
         "live_news_count":     len(all_news),
         "historical_count":    len(historical_news),
@@ -760,6 +841,27 @@ def health():
         "hot_news_count":      len(hot_news),
         "historical_channels": sorted(_hist_channels),
     }
+
+
+@app.get("/health/qdrant")
+async def qdrant_health(response: Response):
+    """Explicit Qdrant check, separated from the fast container liveness check."""
+    try:
+        from pipeline.rag_news import COLLECTION_NAME, get_client
+
+        def _check():
+            client = get_client()
+            info = client.get_collection(COLLECTION_NAME)
+            return int(info.points_count or 0)
+
+        points = await asyncio.wait_for(asyncio.to_thread(_check), timeout=10)
+        return {"status": "ok", "collection": COLLECTION_NAME, "points": points}
+    except Exception as exc:
+        response.status_code = 503
+        return {
+            "status": "unavailable",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 @app.get("/news/all")
@@ -960,10 +1062,10 @@ def get_report_summary():
     import datetime
 
     csv_path     = ROOT / "news_cleaned_filtered.csv"
-    # Prefer xgboost_groq → xgboost_bert → ann_bert → v8 ANN
+    # The deployed signal is the 15-minute BERT + RAG model.
     results_path = next(
         (p for p in [
-            ROOT / "xgb_groq_results.json",
+            ROOT / "xgb_bert_rag_results.json",
             ROOT / "xgb_bert_results.json",
             ROOT / "ann_bert_results.json",
             ROOT / "production_results_v8.json",
@@ -1033,8 +1135,7 @@ def get_report_summary():
     ts_min = ts_max = None
 
     for item in all_news:
-        sc  = max(abs(float(item.get("model_score", 0))),
-                  abs(float(item.get("model_score_1h", 0))))
+        sc = _live_score(item)
         if sc >= SCORE_HOT:   score_high += 1
         elif sc >= SCORE_MED: score_med  += 1
         else:                 score_low  += 1
@@ -1092,9 +1193,9 @@ def get_report_summary():
     _src = results_path.name if results_path.exists() else "not found"
     _is_bert = "bert" in _src
     architecture = {
-        "name":       ("XGBoost (DualBERT + 3-BERT Ensemble Sentiment + RAG)"
+        "name":       ("15-minute XGBoost (DualBERT + 3-BERT Ensemble Sentiment + RAG)"
                        if _is_bert else
-                       "XGBoost (DualBERT + Groq/Llama-3.3-70B Sentiment + RAG)"),
+                       "XGBoost (DualBERT + Groq/Llama-3.3-70B Sentiment)"),
         "type":       "Gradient Boosted Trees — CPU (device=cpu, tree_method=approx)",
         "file":       "xgboost_train_bert.py" if _is_bert else "xgboost_train_groq.py",
         "results_source": _src,
@@ -1278,8 +1379,8 @@ async def explain_news(request: Request, item: ExplainRequest):
     btc_1h    = item.btc_change_1h
     channel   = item.channel
     similar   = item.similar
-    max_score = max(score, score_1h)
-    impact    = _config_impact_tier(score, score_1h)
+    max_score = score
+    impact = _config_impact_tier(score)
 
     sim_block = "No similar historical news found."
     if similar:
@@ -1437,6 +1538,7 @@ async def proxy_stream(ws: WebSocket, symbol: str, interval: str):
 
 # ── Custom news analyzer ──────────────────────────────────────────
 _analyzer_models = {}   # lazy-loaded on first call
+_analyze_semaphore = asyncio.Semaphore(1)
 
 def _get_analyzer_models():
     if _analyzer_models:
@@ -1445,6 +1547,11 @@ def _get_analyzer_models():
     _log.info("Loading BERT + XGBoost models for custom analyzer (CPU)...")
     bert = _load_bert_models(force_cpu=True)
     clf15, _, scaler, thr15, _ = _load_xgb()
+    if scaler.n_features_in_ != clf15.n_features_in_:
+        raise RuntimeError(
+            f"Analyzer model expects {clf15.n_features_in_} features but "
+            f"its scaler expects {scaler.n_features_in_}"
+        )
     _analyzer_models.update({"bert": bert, "clf15": clf15, "scaler": scaler, "thr15": thr15})
     _log.info("Analyzer models ready")
     return _analyzer_models
@@ -1468,7 +1575,7 @@ def _analyze_custom_sync(title: str) -> dict:
         scaler = mdl["scaler"]
         thr15  = mdl["thr15"]
 
-        cb_emb, cb_probs, fb_emb = _encode(bert, title)
+        cb_emb, cb_probs, fb_emb, fb_probs = _encode(bert, title)
 
         # Initialize per-model variables so bert_scores block always has them
         cb_pos = float(cb_probs[2]); cb_neg = float(cb_probs[0])
@@ -1496,7 +1603,8 @@ def _analyze_custom_sync(title: str) -> dict:
             )
             avg_pos, avg_neg, avg_neu = ens.pop("_avg")
             ens_sent, ens_disc, ens_conf = _sent_from_probs(avg_pos, avg_neg, avg_neu)
-            sent = _build_sentiment(cb_probs)
+            sent = _build_sentiment(cb_probs, fb_probs)
+            sent.update(ens)
             sent["sentiment"] = ens_sent
             sent["sentiment_score"] = ens_disc
             sent["confidence"] = round(ens_conf * 100, 2)
@@ -1516,18 +1624,23 @@ def _analyze_custom_sync(title: str) -> dict:
                 net = cb_neg - cb_pos
                 ens_disc = -(3 if net > 0.50 else 2 if net > 0.25 else 1)
                 ens_sent, ens_conf = "negative", cb_neg
-            sent = _build_sentiment(cb_probs)
+            sent = _build_sentiment(cb_probs, fb_probs)
             sent["sentiment"] = ens_sent
             sent["sentiment_score"] = ens_disc
             sent["confidence"] = round(ens_conf * 100, 2)
+            sent.update({
+                "rb_prob_pos": 0.0,
+                "rb_prob_neg": 0.0,
+                "rb_prob_neu": 0.0,
+                "net_agreement": cb_pos - cb_neg,
+            })
             fb_pos = fb_neg = rb_pos = rb_neg = 0.0
 
         pub_dt = datetime.now(tz=_tz.utc)
         now_ts = int(pub_dt.timestamp())
 
-        # RAG query must happen BEFORE feature concatenation so the 10-dim
-        # RAG vector is included in the 1578-dim feature vector the scaler
-        # and model were trained on.  Falls back to zeros on Qdrant errors.
+        # Query RAG before 15-minute inference; its 10 features are part of the
+        # 1578-dimensional input and its neighbors are also shown in the UI.
         similar = []
         rag_feats = np.zeros(10, dtype=np.float32)
         try:
@@ -1542,14 +1655,19 @@ def _analyze_custom_sync(title: str) -> dict:
         except Exception:
             pass
 
-        features = _build_features(cb_emb, fb_emb, sent, pub_dt)
-        features  = np.concatenate([features, rag_feats]).astype(np.float32)
+        features = _build_features(cb_emb, fb_emb, sent, pub_dt, rag_feats)
+
+        if features.shape[0] != clf15.n_features_in_:
+            raise ValueError(
+                f"Analyzer built {features.shape[0]} features, but the deployed "
+                f"model expects {clf15.n_features_in_}"
+            )
 
         X    = scaler.transform(features.reshape(1, -1)).astype(np.float32)
         p15  = float(clf15.predict_proba(X)[0, 1])
         pred = int(p15 >= thr15)
 
-        impact = _config_impact_tier(p15, p15)
+        impact = _config_impact_tier(p15)
         signal = "BUY" if sent["sentiment"] == "positive" else ("SELL" if sent["sentiment"] == "negative" else "NEUTRAL")
 
         from training.xgboost_train_groq import crypto_news_type_classify
@@ -1616,9 +1734,15 @@ def _analyze_custom_sync(title: str) -> dict:
 async def analyze_custom(request: Request, body: AnalyzeRequest):
     _check_rate_limit(_client_ip(request), rpm=20)
     try:
+        await asyncio.wait_for(_analyze_semaphore.acquire(), timeout=0.1)
+    except TimeoutError:
+        raise HTTPException(status_code=503, detail="Analyzer is busy; try again shortly")
+    try:
         return await asyncio.to_thread(_analyze_custom_sync, body.title)
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _analyze_semaphore.release()
 
 
 # ── Entry point ────────────────────────────────────────────────────

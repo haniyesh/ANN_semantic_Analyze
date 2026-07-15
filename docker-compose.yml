@@ -31,18 +31,18 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    ports:
-      - "5432:5432"
 
   api:
     build: .
+    init: true
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     env_file: .env
     environment:
-      DB_URL: postgresql://${POSTGRES_USER:-cryptouser}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cryptonews}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cryptouser}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cryptonews}
+      HF_HOME: /app/model_cache
       LOG_FILE: /app/logs/api.log
     volumes:
       - ./storage:/app/storage          # news_cache.json lives here
@@ -59,34 +59,43 @@ services:
 
   bot:
     build: .
+    init: true
     restart: unless-stopped
     depends_on:
       api:
         condition: service_healthy
     env_file: .env
     environment:
-      DB_URL: postgresql://${POSTGRES_USER:-cryptouser}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cryptonews}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cryptouser}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-cryptonews}
+      DASHBOARD_API: http://api:8000
+      HF_HOME: /app/model_cache
+      TELEGRAM_SESSION: /app/session/telegram_session
       LOG_FILE: /app/logs/bot.log
     volumes:
       - ./storage:/app/storage
       - ./logs:/app/logs
       - model_cache:/app/model_cache
       # Telegram session file must persist across restarts
-      - telegram_session:/app/telegram_session
+      - telegram_session:/app/session
     command: python main.py
 
   dashboard:
-    image: node:20-alpine
-    working_dir: /app
-    volumes:
-      - ./dashboard2:/app
+    build:
+      context: ./dashboard2
+      args:
+        VITE_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+    init: true
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
     ports:
-      - "5173:5173"
-    environment:
-      VITE_API_URL: http://localhost:8000
-    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
-    profiles:
-      - dev   # only started with: docker compose --profile dev up
+      - "5173:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
 volumes:
   pgdata:

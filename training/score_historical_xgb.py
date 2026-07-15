@@ -56,10 +56,12 @@ from config import impact_tier as _impact_tier
 
 MONTHS_WINDOW = 3   # last 3 months
 
-CLF15_PATH   = str(ROOT / "xgb_impact_clf_15m_bert.json")
-CLF1H_PATH   = str(ROOT / "xgb_impact_clf_1h_bert.json")
-SCALER_PATH  = str(ROOT / "xgb_feature_scaler_bert.pkl")
-RESULTS_PATH = ROOT / "xgb_bert_results.json"
+# This legacy historical scorer constructs the one-dummy non-RAG layout.
+# Keep its artifact selection explicit so it cannot load production RAG files.
+CLF15_PATH   = str(ROOT / "xgb_impact_clf_15m_bert_norag.json")
+CLF1H_PATH   = str(ROOT / "xgb_impact_clf_1h_bert_norag.json")
+SCALER_PATH  = str(ROOT / "xgb_feature_scaler_bert_norag.pkl")
+RESULTS_PATH = ROOT / "xgb_bert_norag_results.json"
 
 
 # ── 1. Load CSV (same filters as xgboost_train_bert.load_data) ───────────

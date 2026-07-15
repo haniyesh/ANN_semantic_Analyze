@@ -124,7 +124,7 @@ def build_feature_blocks(df: pd.DataFrame, train_idx: np.ndarray,
     # RAG stream — train-only index, no leakage (same as xgboost_train_bert)
     if skip_rag:
         print("  RAG      : SKIPPED (--skip-rag flag)")
-        rag = np.zeros((len(df), 1), dtype=np.float32)
+        rag = np.zeros((len(df), 10), dtype=np.float32)
     else:
         from pipeline.rag_news import build_rag_features_qdrant
         ch_rates = df.iloc[train_idx].groupby("channel")["is_impactful_15m"].mean().to_dict()

@@ -10,11 +10,11 @@ Flow:
        market_analysis                   → RoBERTa
        crypto-specific types             → CryptoBERT
      CryptoBERT embedding is shared — no duplicate forward pass.
-  3. Run through XGBoost BERT model (DualBERT + PriceContext, 1569 features)
+  3. Run through the 15-minute XGBoost BERT + RAG model (1578 features)
   4. Route — importance-tiered gate on score AND confidence (see config.py):
-     - Display gate (Show): max(score_15m, score_1h) >= 0.30 AND confidence >= 0.50
-     - Medium badge:        max(score_15m, score_1h) >= 0.55 AND confidence >= 0.70
-     - Hot badge / alert:   max(score_15m, score_1h) >= 0.80 AND confidence >= 0.78
+     - Display gate (Show): score_15m >= 0.30 AND confidence >= 0.50
+     - Medium badge:        score_15m >= 0.55 AND confidence >= 0.70
+     - Hot badge / alert:   score_15m >= 0.80 AND confidence >= 0.78
 """
 
 import asyncio
@@ -31,7 +31,6 @@ warnings.filterwarnings("ignore", message=".*downstream task.*")
 import numpy as np
 import httpx
 import torch
-import xgboost as xgb
 from pathlib import Path
 from collections import deque
 from datetime import datetime, timezone
@@ -52,6 +51,8 @@ from config import (
     news_importance,
     FOMC_WEEK_DATES,
     impact_tier,
+    BOT_TOKEN,
+    CHANNEL_ID,
 )
 
 from bot.telegram_listener import start as start_telegram_listener
@@ -62,11 +63,28 @@ from storage.database import (
     save_news, save_price_movement,
 )
 from log import get_logger
+from pipeline.feature_contract import build_bert_rag_features
 _log = get_logger("main")
 
 
 news_queue    = deque()
 price_tracker = PriceTracker()
+
+RAG_PENDING_FILE = Path(__file__).parent / "storage" / "rag_pending_outcomes.json"
+RAG_DEAD_LETTER_FILE = Path(__file__).parent / "storage" / "rag_dead_letter.json"
+BOT_HEALTH_FILE = Path(__file__).parent / "storage" / "bot_health.json"
+DASHBOARD_OUTBOX_FILE = Path(__file__).parent / "storage" / "dashboard_outbox.json"
+RAG_OUTCOME_DELAY_SECONDS = 20 * 60
+RAG_RETRY_SECONDS = 5 * 60
+RAG_MAX_RETRIES = 12
+_rag_pending_lock: asyncio.Lock | None = None
+_dashboard_outbox_lock: asyncio.Lock | None = None
+_dashboard_client: httpx.AsyncClient | None = None
+_shutdown = False
+_bot_started_at = int(time_module.time())
+_last_rag_query_at = 0
+_last_inference_at = 0
+_last_dashboard_delivery_at = 0
 
 FETCH_INTERVAL = 60
 # BATCH_SIZE is imported from config — do not shadow it here
@@ -169,16 +187,15 @@ def _load_model():
     if _model_bundle:
         return _model_bundle
 
-    clf15_path  = ROOT_DIR / "xgb_impact_clf_15m_bert.json"
-    clf1h_path  = ROOT_DIR / "xgb_impact_clf_1h_bert.json"
-    scaler_path = ROOT_DIR / "xgb_feature_scaler_bert.pkl"
+    clf15_path  = ROOT_DIR / "xgb_impact_clf_15m_bert_rag.json"
+    scaler_path = ROOT_DIR / "xgb_feature_scaler_bert_rag.pkl"
 
     if not clf15_path.exists():
         _log.warning("Impact classifier not found — scoring disabled")
         return {}
 
+    import xgboost as xgb
     clf_15m = xgb.XGBClassifier(); clf_15m.load_model(str(clf15_path))
-    clf_1h  = xgb.XGBClassifier(); clf_1h.load_model(str(clf1h_path))
 
     if scaler_path.exists():
         with open(scaler_path, "rb") as f:
@@ -192,12 +209,11 @@ def _load_model():
     fb_tok = AutoTokenizer.from_pretrained("ProsusAI/finbert")
     fb_mdl = AutoModel.from_pretrained("ProsusAI/finbert").eval().to("cpu")
 
-    thr15, thr1h = 0.295, 0.265
-    res_path = ROOT_DIR / "xgb_bert_results.json"
+    thr15 = 0.51
+    res_path = ROOT_DIR / "xgb_bert_rag_results.json"
     if res_path.exists():
         res = json.loads(res_path.read_text())
         thr15 = res.get("threshold_15m", thr15)
-        thr1h = res.get("threshold_1h",  thr1h)
 
     n_features = clf_15m.n_features_in_
     if scaler.n_features_in_ != n_features:
@@ -207,13 +223,13 @@ def _load_model():
         )
 
     _model_bundle = {
-        "clf_15m": clf_15m, "clf_1h": clf_1h, "scaler": scaler,
+        "clf_15m": clf_15m, "scaler": scaler,
         "fb_tok": fb_tok, "fb_mdl": fb_mdl,
-        "thresh15": thr15, "thresh1h": thr1h,
+        "thresh15": thr15,
         "n_features": n_features,
     }
-    _log.info("XGBoost BERT loaded: %d features (thresh15=%.3f thresh1h=%.3f)",
-              n_features, thr15, thr1h)
+    _log.info("15m XGBoost BERT + RAG loaded: %d features (threshold=%.3f)",
+              n_features, thr15)
     return _model_bundle
 
 
@@ -233,16 +249,15 @@ def run_model(features: np.ndarray) -> dict:
 
     X = bundle["scaler"].transform(features.reshape(1, -1)).astype(np.float32)
     p15 = float(bundle["clf_15m"].predict_proba(X)[0, 1])
-    p1h = float(bundle["clf_1h"].predict_proba(X)[0, 1])
 
     return {
         "model_score":      round(p15, 4),
-        "model_score_1h":   round(p1h, 4),
+        "model_score_1h":   0.0,
         "pred_15m":         int(p15 >= bundle["thresh15"]),
-        "pred_1h":          int(p1h >= bundle["thresh1h"]),
+        "pred_1h":          0,
         "prob_15m":         round(p15, 4),
         "reg_pred_15m":     0.0,
-        "confidence_model": round((p15 + p1h) / 2, 4),
+        "confidence_model": round(p15, 4),
     }
 
 
@@ -273,11 +288,11 @@ def build_xgb_features(
     cb_embedding: np.ndarray,
     fb_embedding: np.ndarray,
     macro: np.ndarray,
+    rag_features: np.ndarray | None = None,
 ) -> np.ndarray:
     """
-    Build 1569-dim flat feature vector matching xgboost_train_bert training layout:
-      CryptoBERT(768) | FinBERT(768) | sentiment(13) | type_probs(11) | macro(8) | RAG(1, zeros)
-    RAG is always zeros — model trained in skip-RAG mode (np.zeros((n, 1))).
+    Build the 1578-dim vector expected by the 15-minute RAG model:
+      CryptoBERT(768) | FinBERT(768) | sentiment(13) | type_probs(11) | macro(8) | RAG(10)
     """
     try:
         from training.xgboost_train_bert import crypto_news_type_classify
@@ -285,18 +300,10 @@ def build_xgb_features(
     except Exception:
         type_probs = np.zeros(11, dtype=np.float32)
 
-    sent_vec = np.array([
-        sent.get("cb_prob_pos", 0), sent.get("cb_prob_neg", 0), sent.get("cb_prob_neu", 0),
-        sent.get("fb_prob_pos", 0), sent.get("fb_prob_neg", 0), sent.get("fb_prob_neu", 0),
-        sent.get("rb_prob_pos", 0), sent.get("rb_prob_neg", 0), sent.get("rb_prob_neu", 0),
-        sent.get("net_agreement", 0),
-        sent.get("sentiment_score", 0),
-        sent.get("weight", 5),
-        sent.get("confidence", 0),
-    ], dtype=np.float32)
-
-    rag = np.zeros(1, dtype=np.float32)
-    return np.concatenate([cb_embedding, fb_embedding, sent_vec, type_probs, macro, rag]).astype(np.float32)
+    rag = rag_features if rag_features is not None else np.zeros(10, dtype=np.float32)
+    return build_bert_rag_features(
+        sent, cb_embedding, fb_embedding, type_probs, macro, rag
+    )
 
 
 _btc_vol_mom_cache: dict = {"val": (0.0, 0.0), "ts": 0}
@@ -386,6 +393,7 @@ def query_rag(title: str, published_ts: int, channel: str) -> tuple[np.ndarray, 
     Query Qdrant for similar past news.
     Returns (rag_features_10dim, similar_news_list).
     """
+    global _last_rag_query_at
     try:
         from pipeline.rag_news import query_single
         ch_rates = {
@@ -410,6 +418,7 @@ def query_rag(title: str, published_ts: int, channel: str) -> tuple[np.ndarray, 
             channel_impact_rates=ch_rates,
             macro_now=macro_now,
         )
+        _last_rag_query_at = int(time_module.time())
         return result["features"], result.get("similar_news", [])
     except Exception as e:
         _log.warning("RAG query failed: %s", e)
@@ -419,24 +428,23 @@ def query_rag(title: str, published_ts: int, channel: str) -> tuple[np.ndarray, 
 # ══════════════════════════════════════════════════════════════════
 # HOT SIGNAL CHECK
 # ══════════════════════════════════════════════════════════════════
-def is_hot(model_score: float, model_score_1h: float,
-           confidence: float, age_minutes: float) -> bool:
-    """Hot tier: max(score_15m, score_1h) >= HOT_MIN_MODEL_SCORE AND
+def is_hot(model_score: float, confidence: float, age_minutes: float) -> bool:
+    """Hot tier: score_15m >= HOT_MIN_MODEL_SCORE AND
     confidence >= HOT_MIN_CONFIDENCE AND age < HOT_MAX_AGE_MIN."""
     return (
-        max(abs(model_score), abs(model_score_1h)) >= HOT_MIN_MODEL_SCORE and
+        abs(model_score) >= HOT_MIN_MODEL_SCORE and
         confidence       >= HOT_MIN_CONFIDENCE   and
         age_minutes      <  HOT_MAX_AGE_MIN
     )
 
 
-def should_display_in_all(model_score, model_score_1h, confidence, title=""):
+def should_display_in_all(model_score, confidence, title=""):
     """Display gate: score >= IMPORTANT_MIN_SCORE AND confidence >= IMPORTANT_MIN_CONFIDENCE
     AND title >= 20 chars."""
     if len(title.strip()) < 20:
         return False
     return (
-        max(abs(model_score), abs(model_score_1h)) >= IMPORTANT_MIN_SCORE and
+        abs(model_score) >= IMPORTANT_MIN_SCORE and
         confidence >= IMPORTANT_MIN_CONFIDENCE
     )
 
@@ -444,27 +452,113 @@ def should_display_in_all(model_score, model_score_1h, confidence, title=""):
 # ══════════════════════════════════════════════════════════════════
 # DASHBOARD ROUTING
 # ══════════════════════════════════════════════════════════════════
-async def send_to_dashboard(payload: dict):
+async def _post_to_dashboard(payload: dict) -> bool:
     """Send signal to dashboard ALL feed."""
+    global _dashboard_client, _last_dashboard_delivery_at
     try:
         headers = {}
         _key = os.getenv("INGEST_API_KEY", "")
         if _key:
             headers["X-API-Key"] = _key
-        async with httpx.AsyncClient() as client:
-            await client.post(f"{DASHBOARD_API}/news", json=payload, headers=headers, timeout=3)
+        if _dashboard_client is None or _dashboard_client.is_closed:
+            _dashboard_client = httpx.AsyncClient(timeout=httpx.Timeout(5.0))
+        response = await _dashboard_client.post(
+            f"{DASHBOARD_API}/news", json=payload, headers=headers
+        )
+        response.raise_for_status()
+        _last_dashboard_delivery_at = int(time_module.time())
+        return True
+    except httpx.HTTPStatusError as exc:
+        _log.error(
+            "Dashboard rejected news | status=%d | %s",
+            exc.response.status_code,
+            payload.get("title", "")[:60],
+        )
     except Exception as e:
         _log.warning("Dashboard API error: %s", e)
+    return False
+
+
+def _read_dashboard_outbox() -> list[dict]:
+    if not DASHBOARD_OUTBOX_FILE.exists():
+        return []
+    try:
+        data = json.loads(DASHBOARD_OUTBOX_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (OSError, json.JSONDecodeError) as exc:
+        _log.error("Cannot read dashboard outbox: %s", exc)
+        return []
+
+
+def _write_dashboard_outbox(items: list[dict]) -> None:
+    DASHBOARD_OUTBOX_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = DASHBOARD_OUTBOX_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(DASHBOARD_OUTBOX_FILE)
+
+
+def _get_dashboard_outbox_lock() -> asyncio.Lock:
+    global _dashboard_outbox_lock
+    if _dashboard_outbox_lock is None:
+        _dashboard_outbox_lock = asyncio.Lock()
+    return _dashboard_outbox_lock
+
+
+async def _enqueue_dashboard_delivery(payload: dict) -> None:
+    async with _get_dashboard_outbox_lock():
+        items = await asyncio.to_thread(_read_dashboard_outbox)
+        item_id = payload.get("id")
+        items = [item for item in items if item.get("payload", {}).get("id") != item_id]
+        items.append({
+            "payload": payload,
+            "attempts": 0,
+            "next_attempt_at": int(time_module.time()) + 30,
+        })
+        await asyncio.to_thread(_write_dashboard_outbox, items)
+
+
+async def send_to_dashboard(payload: dict) -> bool:
+    """Deliver immediately or persist for retry across process restarts."""
+    delivered = await _post_to_dashboard(payload)
+    if not delivered:
+        await _enqueue_dashboard_delivery(payload)
+    return delivered
+
+
+async def dashboard_delivery_worker_loop() -> None:
+    while True:
+        async with _get_dashboard_outbox_lock():
+            items = await asyncio.to_thread(_read_dashboard_outbox)
+        now = int(time_module.time())
+        for queued in items:
+            if int(queued.get("next_attempt_at", 0)) > now:
+                continue
+            payload = queued.get("payload", {})
+            delivered = await _post_to_dashboard(payload)
+            async with _get_dashboard_outbox_lock():
+                current = await asyncio.to_thread(_read_dashboard_outbox)
+                match_id = payload.get("id")
+                if delivered:
+                    current = [q for q in current if q.get("payload", {}).get("id") != match_id]
+                else:
+                    for q in current:
+                        if q.get("payload", {}).get("id") == match_id:
+                            q["attempts"] = int(q.get("attempts", 0)) + 1
+                            delay = min(30 * (2 ** min(q["attempts"], 7)), 3600)
+                            q["next_attempt_at"] = int(time_module.time()) + delay
+                await asyncio.to_thread(_write_dashboard_outbox, current)
+        await asyncio.sleep(15)
 
 
 async def post_hot_to_telegram(payload: dict):
     """Post hot signal to Telegram signal channel."""
     try:
         from telegram import Bot
-        bot     = Bot(token=os.getenv("BOT_TOKEN"))
-        chat_id = os.getenv("SIGNAL_CHANNEL_ID")
-        if not chat_id:
+        if not BOT_TOKEN or not CHANNEL_ID:
+            _log.error("Telegram hot alert skipped: bot token or channel ID is missing")
             return
+        bot = Bot(token=BOT_TOKEN)
+        chat_id = CHANNEL_ID
 
         emoji = "🟢" if payload["type"] == "BUY" else "🔴" if payload["type"] == "SELL" else "🟡"
         similar_text = ""
@@ -506,7 +600,7 @@ async def process_news_item(news: dict):
       2. Sentiment scoring (CryptoBERT + FinBERT + RoBERTa ensemble)
       3. CryptoBERT embedding + news type classification
       4. RAG query (Qdrant)
-      5. Model inference (XGBoost BERT: xgb_impact_clf_15m/1h_bert.json)
+      5. Model inference (15-minute XGBoost BERT + RAG)
       6. Score normalization + US hours boost
       7. Dashboard + Telegram routing
     """
@@ -602,10 +696,12 @@ async def process_news_item(news: dict):
     )
 
     # ── Step 4: Build flat XGBoost feature vector ─────────────────
-    features = build_xgb_features(sent, embedding, fb_embedding, macro)
+    features = build_xgb_features(sent, embedding, fb_embedding, macro, rag_features)
 
     # ── Step 5: Model inference (offloaded) ────────────────────────
+    global _last_inference_at
     model_result   = await asyncio.to_thread(run_model, features)
+    _last_inference_at = int(time_module.time())
 
     # XGBoost outputs calibrated probs [0,1] — normalization is identity (min=0, max=1)
     model_score    = _normalize_score(
@@ -623,7 +719,7 @@ async def process_news_item(news: dict):
     )
     confidence_pct = round(sent["confidence"] * 100)
 
-    _nid = hashlib.sha1(f"{channel}|{title}|{published_ts}".encode()).hexdigest()[:16]
+    _nid = hashlib.sha1(f"{channel}|{title}|{published_ts}".encode()).hexdigest()[:32]
 
     payload = {
         "id":               _nid,
@@ -667,16 +763,21 @@ async def process_news_item(news: dict):
         ],
     }
 
+    # Every valid scored item contributes to the future RAG corpus, regardless
+    # of whether it is important enough to be displayed on the dashboard.
+    try:
+        await enqueue_rag_outcome(payload)
+    except Exception as exc:
+        _log.error("Failed to persist RAG outcome job: %s", exc)
+
     # ── Step 6: Route ─────────────────────────────────────────────
-    if should_display_in_all(model_score, model_score_1h, confidence_pct / 100, title):
+    if should_display_in_all(model_score, confidence_pct / 100, title):
         _log.info(
             "%s | w=%s | score=%.2f | conf=%s%% | %s | %s",
             signal_type, sent['weight'], model_score, confidence_pct,
             pub_dt.strftime('%Y-%m-%d %H:%M UTC'), title[:55],
         )
         await send_to_dashboard(payload)
-        if payload.get("id"):
-            asyncio.create_task(_update_qdrant_outcome(payload))
     else:
         _log.debug(
             "Filtered | score=%.2f conf=%s%% | %s | %s",
@@ -686,7 +787,7 @@ async def process_news_item(news: dict):
         return
 
     # HOT → Telegram
-    if is_hot(model_score, model_score_1h, confidence_pct / 100, age_minutes):
+    if is_hot(model_score, confidence_pct / 100, age_minutes):
         _log.info("HOT SIGNAL | Posting to Telegram")
         await post_hot_to_telegram(payload)
 
@@ -700,26 +801,165 @@ async def process_news_item(news: dict):
     return payload
 
 
-async def _update_qdrant_outcome(payload: dict, delay_seconds: int = 20 * 60) -> None:
-    """Wait delay_seconds, then patch the Qdrant point with real btc_change values."""
-    await asyncio.sleep(delay_seconds)
+def _read_rag_pending() -> list[dict]:
+    if not RAG_PENDING_FILE.exists():
+        return []
     try:
-        pub_ts = payload.get("published_ts") or int(time_module.time())
-        pub_dt = datetime.fromtimestamp(pub_ts, tz=timezone.utc)
-        prices = await get_price_at_times("BTC", pub_dt, intervals=[15, 60])
-        p0, p15, p1h = prices.get(0), prices.get(15), prices.get(60)
-        if not p0 or not p15:
-            return
-        change_15m = calculate_movement(p0, p15).get("change_percent", 0.0)
-        change_1h  = calculate_movement(p0, p1h).get("change_percent", 0.0) if p1h else 0.0
-        from pipeline.rag_news import update_live_news_outcome
-        await asyncio.to_thread(
-            update_live_news_outcome, payload["id"], change_15m, change_1h
-        )
-        _log.debug("Qdrant updated | %s | 15m=%+.2f%% 1h=%+.2f%%",
-                   payload.get("title", "")[:50], change_15m, change_1h)
-    except Exception as exc:
-        _log.warning("Qdrant outcome update failed: %s", exc)
+        data = json.loads(RAG_PENDING_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (OSError, json.JSONDecodeError) as exc:
+        _log.error("Cannot read persistent RAG outcome queue: %s", exc)
+        return []
+
+
+def _write_rag_pending(items: list[dict]) -> None:
+    RAG_PENDING_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = RAG_PENDING_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(items, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(RAG_PENDING_FILE)
+
+
+def _append_rag_dead_letter(item: dict) -> None:
+    try:
+        existing = json.loads(RAG_DEAD_LETTER_FILE.read_text(encoding="utf-8")) \
+            if RAG_DEAD_LETTER_FILE.exists() else []
+        if not isinstance(existing, list):
+            existing = []
+    except (OSError, json.JSONDecodeError):
+        existing = []
+    existing.append(item)
+    RAG_DEAD_LETTER_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = RAG_DEAD_LETTER_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(existing, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(RAG_DEAD_LETTER_FILE)
+
+
+def _get_rag_pending_lock() -> asyncio.Lock:
+    global _rag_pending_lock
+    if _rag_pending_lock is None:
+        _rag_pending_lock = asyncio.Lock()
+    return _rag_pending_lock
+
+
+async def enqueue_rag_outcome(payload: dict) -> None:
+    """Durably schedule every scored item for outcome-ready RAG indexing."""
+    pub_ts = int(payload.get("published_ts") or time_module.time())
+    pending = {
+        "id": payload["id"],
+        "title": payload.get("title", ""),
+        "channel": payload.get("channel", ""),
+        "link": payload.get("link", ""),
+        "published_ts": pub_ts,
+        "due_at": max(int(time_module.time()), pub_ts + RAG_OUTCOME_DELAY_SECONDS),
+        "attempts": 0,
+    }
+    async with _get_rag_pending_lock():
+        items = await asyncio.to_thread(_read_rag_pending)
+        items = [item for item in items if item.get("id") != pending["id"]]
+        items.append(pending)
+        await asyncio.to_thread(_write_rag_pending, items)
+
+
+async def _retry_rag_item(item: dict, error: str) -> None:
+    async with _get_rag_pending_lock():
+        items = await asyncio.to_thread(_read_rag_pending)
+        dead_item = None
+        for saved in items:
+            if saved.get("id") == item.get("id"):
+                saved["attempts"] = int(saved.get("attempts", 0)) + 1
+                delay = min(
+                    RAG_RETRY_SECONDS * (2 ** min(saved["attempts"] - 1, 6)),
+                    6 * 60 * 60,
+                )
+                saved["due_at"] = int(time_module.time()) + delay
+                saved["last_error"] = error[:200]
+                if saved["attempts"] >= RAG_MAX_RETRIES:
+                    saved["failed_at"] = int(time_module.time())
+                    dead_item = dict(saved)
+        if dead_item is not None:
+            items = [saved for saved in items if saved.get("id") != dead_item["id"]]
+        await asyncio.to_thread(_write_rag_pending, items)
+        if dead_item is not None:
+            await asyncio.to_thread(_append_rag_dead_letter, dead_item)
+            _log.critical(
+                "RAG job moved to dead letter after %d attempts | %s",
+                dead_item["attempts"], dead_item.get("title", "")[:60],
+            )
+
+
+async def _complete_rag_item(item_id: str) -> None:
+    async with _get_rag_pending_lock():
+        items = await asyncio.to_thread(_read_rag_pending)
+        items = [item for item in items if item.get("id") != item_id]
+        await asyncio.to_thread(_write_rag_pending, items)
+
+
+async def rag_outcome_worker_loop() -> None:
+    """Resume pending Qdrant inserts/outcome updates after process restarts."""
+    while True:
+        async with _get_rag_pending_lock():
+            items = await asyncio.to_thread(_read_rag_pending)
+        now = int(time_module.time())
+        due = [item for item in items if int(item.get("due_at", 0)) <= now]
+
+        for item in due:
+            try:
+                from pipeline.rag_news import upsert_live_news_outcome
+
+                pub_dt = datetime.fromtimestamp(int(item["published_ts"]), tz=timezone.utc)
+                prices = await get_price_at_times("BTC", pub_dt, intervals=[15])
+                p0, p15 = prices.get(0), prices.get(15)
+                if not p0 or not p15:
+                    await _retry_rag_item(item, "15-minute price unavailable")
+                    continue
+
+                change_15m = calculate_movement(p0, p15).get("change_percent", 0.0)
+                updated = await asyncio.to_thread(
+                    upsert_live_news_outcome, item, change_15m, 0.0
+                )
+                if not updated:
+                    await _retry_rag_item(item, "Qdrant labelled upsert unavailable")
+                    continue
+
+                await _complete_rag_item(item["id"])
+                _log.info("RAG outcome saved | %s | 15m=%+.2f%%",
+                          item.get("title", "")[:50], change_15m)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log.warning("RAG outcome retry scheduled: %s", exc)
+                await _retry_rag_item(item, str(exc))
+
+        await asyncio.sleep(30)
+
+
+async def bot_heartbeat_loop() -> None:
+    """Publish bot liveness/progress for the API health endpoint."""
+    while True:
+        try:
+            pending = await asyncio.to_thread(_read_rag_pending)
+            dashboard_pending = await asyncio.to_thread(_read_dashboard_outbox)
+            heartbeat = {
+                "timestamp": int(time_module.time()),
+                "started_at": _bot_started_at,
+                "news_queue_size": len(news_queue),
+                "rag_pending_outcomes": len(pending),
+                "dashboard_pending_deliveries": len(dashboard_pending),
+                "last_rag_query_at": _last_rag_query_at,
+                "last_inference_at": _last_inference_at,
+                "last_dashboard_delivery_at": _last_dashboard_delivery_at,
+            }
+            BOT_HEALTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = BOT_HEALTH_FILE.with_suffix(".tmp")
+            await asyncio.to_thread(
+                tmp.write_text, json.dumps(heartbeat), encoding="utf-8"
+            )
+            await asyncio.to_thread(tmp.replace, BOT_HEALTH_FILE)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.warning("Bot heartbeat write failed: %s", exc)
+        await asyncio.sleep(30)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -811,7 +1051,27 @@ async def price_tracker_loop(pool):
 # MAIN
 # ══════════════════════════════════════════════════════════════════
 async def main():
+    global _shutdown, _rag_pending_lock, _dashboard_outbox_lock, _dashboard_client
     loop = asyncio.get_running_loop()
+    # A crash restart creates a new event loop; do not reuse a lock that may
+    # have been bound to the previous, now-closed loop.
+    _rag_pending_lock = None
+    _dashboard_outbox_lock = None
+    shutdown_event = asyncio.Event()
+
+    def _request_shutdown() -> None:
+        global _shutdown
+        _shutdown = True
+        shutdown_event.set()
+        _log.info("Shutdown requested — cancelling background tasks")
+
+    try:
+        import signal
+        loop.add_signal_handler(signal.SIGTERM, _request_shutdown)
+        loop.add_signal_handler(signal.SIGINT, _request_shutdown)
+    except (NotImplementedError, RuntimeError):
+        # Signal handlers are unavailable on some embedded/Windows loops.
+        pass
 
     def _suppress_connection_lost(loop, context):
         msg = str(context.get("exception", context.get("message", ""))).lower()
@@ -834,16 +1094,37 @@ async def main():
     _log.info("Dashboard: %s", DASHBOARD_API)
     _log.info("Bot started")
 
-    await asyncio.gather(
-        start_telegram_listener(news_queue),
-        processor_loop(pool),
-        price_tracker_loop(pool),
-        return_exceptions=True,
-    )
+    tasks = {
+        asyncio.create_task(start_telegram_listener(news_queue), name="telegram-listener"),
+        asyncio.create_task(processor_loop(pool), name="news-processor"),
+        asyncio.create_task(price_tracker_loop(pool), name="price-tracker"),
+        asyncio.create_task(rag_outcome_worker_loop(), name="rag-outcome-worker"),
+        asyncio.create_task(dashboard_delivery_worker_loop(), name="dashboard-delivery-worker"),
+        asyncio.create_task(bot_heartbeat_loop(), name="bot-heartbeat"),
+    }
+    stop_task = asyncio.create_task(shutdown_event.wait(), name="shutdown-waiter")
+
+    try:
+        done, _ = await asyncio.wait(tasks | {stop_task}, return_when=asyncio.FIRST_COMPLETED)
+        if stop_task not in done:
+            failed = next(iter(done))
+            exc = failed.exception()
+            if exc is not None:
+                raise RuntimeError(f"Critical task {failed.get_name()} failed") from exc
+            raise RuntimeError(f"Critical task {failed.get_name()} exited unexpectedly")
+    finally:
+        stop_task.cancel()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(stop_task, *tasks, return_exceptions=True)
+        if _dashboard_client is not None:
+            await _dashboard_client.aclose()
+            _dashboard_client = None
+        if pool is not None:
+            await pool.close()
 
 
 if __name__ == "__main__":
-    import signal
     import traceback
     from log import setup_logging
 
@@ -851,14 +1132,6 @@ if __name__ == "__main__":
 
     from config import validate_bot
     validate_bot()
-
-    # SIGTERM — set a flag so the crash loop exits cleanly (systemd / Docker stop)
-    _shutdown = False
-    def _handle_sigterm(sig, frame):
-        global _shutdown
-        _shutdown = True
-        _log.info("SIGTERM received — shutting down after current iteration")
-    signal.signal(signal.SIGTERM, _handle_sigterm)
 
     _log.info("Loading models (XGBoost v9 + DualBERT)…")
     _load_sentiment_models()

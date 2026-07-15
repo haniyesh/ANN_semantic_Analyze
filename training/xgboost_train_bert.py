@@ -273,7 +273,12 @@ def build_macro_features(df: pd.DataFrame) -> np.ndarray:
 # ══════════════════════════════════════════════════════════════════
 # 4. FEATURE ENGINEERING  — flat matrix for XGBoost
 # ══════════════════════════════════════════════════════════════════
-def build_features(df: pd.DataFrame, train_idx: np.ndarray, skip_rag: bool = False):
+def build_features(
+    df: pd.DataFrame,
+    train_idx: np.ndarray,
+    skip_rag: bool = False,
+    use_rag_cache: bool = False,
+):
     print("[2/7] FEATURE ENGINEERING")
 
     cb_emb = compute_cryptobert_embeddings(df)   # (N, 768)
@@ -325,11 +330,18 @@ def build_features(df: pd.DataFrame, train_idx: np.ndarray, skip_rag: bool = Fal
         # so val/test outcomes can never leak into any row's RAG features.
         rag, _   = build_rag_features_qdrant(
             df, channel_impact_rates=ch_rates,
-            train_idx=train_idx, rebuild=True,
+            train_idx=train_idx, rebuild=not use_rag_cache,
         )
         print(f"  RAG      : {rag.shape[1]} dims")
 
     X = np.hstack([cb_emb, fb_emb, sent_df, type_probs, macro, rag]).astype(np.float32)
+    from pipeline.feature_contract import TOTAL_DIM
+    expected_dim = 1569 if skip_rag else TOTAL_DIM
+    if X.shape[1] != expected_dim:
+        raise ValueError(
+            f"Training built {X.shape[1]} features for "
+            f"{'non-RAG' if skip_rag else 'RAG'}, expected {expected_dim}"
+        )
     print(f"  Total features: {X.shape[1]}")
 
     feat_names = (
@@ -646,6 +658,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--compare",   action="store_true", help="Print ANN vs XGBoost table")
     parser.add_argument("--skip-rag",  action="store_true", help="Skip RAG (faster debug run)")
+    parser.add_argument(
+        "--use-rag-cache",
+        action="store_true",
+        help="Reuse the existing leakage-safe 10-dim RAG cache instead of rebuilding Qdrant",
+    )
     parser.add_argument("--load-only", action="store_true", help="Load saved models, skip training")
     args = parser.parse_args()
 
@@ -679,16 +696,24 @@ def main():
     print(f"  Train ≤ {t_train_max}  <  Val ≤ {t_val_max}  <  Test starts {t_test_min}")
 
     (X, feat_names,
-     y_r15, y_c15, y_r1h, y_c1h, y_dir) = build_features(df, tri, skip_rag=args.skip_rag)
+     y_r15, y_c15, y_r1h, y_c1h, y_dir) = build_features(
+        df,
+        tri,
+        skip_rag=args.skip_rag,
+        use_rag_cache=args.use_rag_cache,
+    )
 
     scaler = StandardScaler()
     X_tr   = scaler.fit_transform(X[tri]).astype(np.float32)
     X_vl   = scaler.transform(X[vi]).astype(np.float32)
     X_te   = scaler.transform(X[te_idx]).astype(np.float32)
 
-    clf15_path = str(HERE / "xgb_impact_clf_15m_bert.json")
-    clf1h_path = str(HERE / "xgb_impact_clf_1h_bert.json")
-    reg15_path = str(HERE / "xgb_price_reg_15m_bert.json")
+    variant = "norag" if args.skip_rag else "rag"
+    clf15_path = str(HERE / f"xgb_impact_clf_15m_bert_{variant}.json")
+    clf1h_path = str(HERE / f"xgb_impact_clf_1h_bert_{variant}.json")
+    reg15_path = str(HERE / f"xgb_price_reg_15m_bert_{variant}.json")
+    scaler_path = str(HERE / f"xgb_feature_scaler_bert_{variant}.pkl")
+    results_path = HERE / f"xgb_bert_{variant}_results.json"
 
     if args.load_only and Path(clf15_path).exists():
         (p15_vl, p1h_vl,
@@ -706,10 +731,9 @@ def main():
             clf15_path, clf1h_path, reg15_path,
         )
         import pickle
-        scaler_path = str(HERE / "xgb_feature_scaler_bert.pkl")
         with open(scaler_path, "wb") as f:
             pickle.dump(scaler, f)
-        print(f"  Models + scaler saved → {HERE}/xgb_*")
+        print(f"  {variant} models + scaler saved → {HERE}/xgb_*_{variant}.*")
 
     print(f"\n[5/7] THRESHOLD SEARCH (min_precision={MIN_PRECISION})")
     thr_15m = find_threshold(p15_vl, y_c15[vi], "15m")
@@ -722,7 +746,7 @@ def main():
 
     # Save per-row test predictions for bootstrap CIs / paired significance
     # tests (used by training/compare_matrix.py).
-    preds_path = str(HERE / "xgb_bert_test_preds.npz")
+    preds_path = str(HERE / f"xgb_bert_{variant}_test_preds.npz")
     np.savez(
         preds_path,
         p15=p15_te, p1h=p1h_te, r15=r15_te,
@@ -748,6 +772,8 @@ def main():
     print(f"\n  Direction: Acc={dir_acc:.1%}  F1={dir_f1:.3f}")
 
     xgb_results = {
+        "feature_dim": int(X.shape[1]),
+        "rag_enabled": not args.skip_rag,
         "15_minute": r15,
         "1_hour":    r1h,
         "direction": {"Acc": float(dir_acc), "F1": float(dir_f1)},
@@ -757,9 +783,9 @@ def main():
         "baselines_1h":  base_1h,
         "split": "chronological_70_15_15",
     }
-    with open(XGB_RESULTS_PATH, "w") as f:
+    with open(results_path, "w") as f:
         json.dump(xgb_results, f, indent=2)
-    print(f"\n  Saved → {XGB_RESULTS_PATH}")
+    print(f"\n  Saved → {results_path}")
 
     print_feature_importance(feat_imp_15m, feat_names)
 
@@ -776,7 +802,7 @@ def main():
     print(f"  Threshold 1h  : {thr_1h:.2f}")
     print(f"  clf_15m F1    : {r15['F1']:.3f}")
     print(f"  clf_1h  F1    : {r1h['F1']:.3f}")
-    print(f"  Results       → {XGB_RESULTS_PATH}")
+    print(f"  Results       → {results_path}")
 
 
 if __name__ == "__main__":

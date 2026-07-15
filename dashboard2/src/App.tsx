@@ -91,7 +91,7 @@ const _cfg = {
 };
 
 function scoreTier(score15, conf, score1h) {
-  const s = Math.max(Math.abs(score15 || 0), Math.abs(score1h || 0));
+  const s = Math.abs(score15 || 0);
   const c = conf || 0;
   if (c < _cfg.confMin)   return "Hidden";
   if (s >= _cfg.scoreHot) return "Hot";
@@ -124,7 +124,7 @@ function newsTier(item) {
 }
 
 function signalAction(type, modelScore, modelScore1h) {
-  const s = Math.max(Math.abs(modelScore || 0), Math.abs(modelScore1h || 0));
+  const s = Math.abs(modelScore || 0);
   if (type === "BUY")  return s >= _cfg.scoreHot ? "Strong Buy"  : "Buy";
   if (type === "SELL") return s >= _cfg.scoreHot ? "Strong Sell" : "Sell";
   return "Neutral";
@@ -160,7 +160,7 @@ function passesFilter(n) {
     && (n.title || "").trim().length >= 20;
 }
 function passesChartFilter(n) {
-  const s = Math.max(Math.abs(n.model_score || 0), Math.abs(n.model_score_1h || 0));
+  const s = Math.abs(n.model_score || 0);
   return passesFilter(n) && s >= _cfg.scoreShow;
 }
 function channelLogo(channel = "") {
@@ -2353,7 +2353,7 @@ export default function CryptoDashboard() {
   const mostRecentIsToday = mostRecentDayNews.length > 0 &&
     localDateKey(mostRecentDayNews[0].published_ts || mostRecentDayNews[0].received_at || 0) === todayLocal;
 
-  // Tab filters — impact badges use max(score_15m, score_1h), importance uses newsTier()
+  // Tab filters — live impact badges use only the production 15-minute score.
   const hotTabNews       = newsForDate(n => passesFilter(n) && scoreTier(Math.abs(n.model_score || 0), n.confidence, Math.abs(n.model_score_1h || 0)) === "Hot");
   const importantTabNews = newsForDate(n => passesFilter(n) && scoreTier(Math.abs(n.model_score || 0), n.confidence, Math.abs(n.model_score_1h || 0)) === "Medium");
   const keyTabNews       = newsForDate(n => passesFilter(n) && newsTier(n).tier === "Key");   // Editorially important regardless of price impact

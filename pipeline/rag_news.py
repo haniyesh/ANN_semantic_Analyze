@@ -757,7 +757,7 @@ def add_new_point(
     )
 
 
-def index_live_news(item: dict) -> None:
+def index_live_news(item: dict) -> bool:
     """Index one live news item into Qdrant immediately after ingest.
 
     btc_change fields are unknown at ingest time and default to 0.0.
@@ -775,7 +775,7 @@ def index_live_news(item: dict) -> None:
     try:
         item_id = (item.get("id") or "")
         if not item_id or len(item_id) < 32:
-            return
+            return False
 
         point_id = str(_uuid.UUID(hex=item_id[:32]))
         ts       = int(item.get("published_ts") or time.time())
@@ -815,11 +815,71 @@ def index_live_news(item: dict) -> None:
                 },
             )],
         )
+        return True
     except Exception as exc:
         logging.getLogger(__name__).warning("Qdrant live index failed: %s", exc)
+        return False
 
 
-def update_live_news_outcome(item_id: str, btc_change_15m: float, btc_change_1h: float) -> None:
+def upsert_live_news_outcome(
+    item: dict,
+    btc_change_15m: float,
+    btc_change_1h: float = 0.0,
+) -> bool:
+    """Atomically insert a live news point with its known price outcome."""
+    import uuid as _uuid
+    import logging
+
+    try:
+        item_id = item.get("id") or ""
+        if len(item_id) < 32:
+            return False
+
+        point_id = str(_uuid.UUID(hex=item_id[:32]))
+        ts = int(item.get("published_ts") or time.time())
+        title = (item.get("title") or "")[:200]
+        dt = pd.Timestamp(ts, unit="s", tz="UTC")
+        hour = dt.hour
+        dow = dt.dayofweek
+
+        client = get_client()
+        embedder = get_embedder()
+        vector = list(embedder.embed([title]))[0].tolist()
+        impactful_15m = int(abs(btc_change_15m) >= IMPACT_THRESHOLD_15M)
+        impactful_1h = int(abs(btc_change_1h) >= IMPACT_THRESHOLD_1H)
+
+        client.upsert(
+            collection_name=COLLECTION_NAME,
+            wait=True,
+            points=[PointStruct(
+                id=point_id,
+                vector=vector,
+                payload={
+                    "timestamp": ts,
+                    "title": title,
+                    "channel": item.get("channel", ""),
+                    "published": str(dt),
+                    "link": item.get("link", ""),
+                    "btc_change_15m": float(btc_change_15m),
+                    "btc_change_1h": float(btc_change_1h),
+                    "is_impactful_15m": impactful_15m,
+                    "is_impactful_1h": impactful_1h,
+                    "is_impactful": int(impactful_15m or impactful_1h),
+                    "is_weekend": float(dow >= 5),
+                    "is_low_liquidity": float(2 <= hour <= 6),
+                    "is_us_hours": float(13 <= hour <= 21),
+                    "is_asia_hours": float(0 <= hour <= 8),
+                    "fomc_week": float(item.get("fomc_week", 0.0) or 0.0),
+                },
+            )],
+        )
+        return True
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Qdrant labelled upsert failed: %s", exc)
+        return False
+
+
+def update_live_news_outcome(item_id: str, btc_change_15m: float, btc_change_1h: float) -> bool:
     """Patch the btc_change fields on a previously indexed live news point.
 
     Called ~20 minutes after ingest once real price outcomes are known.
@@ -830,7 +890,7 @@ def update_live_news_outcome(item_id: str, btc_change_15m: float, btc_change_1h:
 
     try:
         if not item_id or len(item_id) < 32:
-            return
+            return False
         point_id = str(_uuid.UUID(hex=item_id[:32]))
         client   = get_client()
         client.set_payload(
@@ -847,8 +907,10 @@ def update_live_news_outcome(item_id: str, btc_change_15m: float, btc_change_1h:
             },
             points=[point_id],
         )
+        return True
     except Exception as exc:
         logging.getLogger(__name__).warning("Qdrant outcome update failed: %s", exc)
+        return False
 
 
 # ══════════════════════════════════════════════════════════════════

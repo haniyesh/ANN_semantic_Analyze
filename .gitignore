@@ -7,6 +7,7 @@ __pycache__/
 *.npz
 *.pt
 *.pkl
+!xgb_feature_scaler_bert_rag.pkl
 *.Zone.Identifier
 *:Zone.Identifier
 
@@ -23,6 +24,7 @@ fear_greed_cache.json
 
 # XGBoost binary model files (large artifacts — share via release/Drive)
 xgb_impact_clf_*.json
+!xgb_impact_clf_15m_bert_rag.json
 xgb_price_reg_*.json
 
 # Telegram session files (sensitive credentials)
@@ -51,4 +53,3 @@ groq_sentiment_cache.json
 # Results JSONs are intentionally tracked — main.py and the API read
 # thresholds and metrics from them at startup.
 # xgb_bert_results.json, xgb_groq_results.json, ann_*_results.json → committed
-.github/workflows/

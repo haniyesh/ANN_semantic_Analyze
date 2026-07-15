@@ -31,16 +31,14 @@ def test_server_imports_thresholds_from_config():
 
 def test_config_endpoint_values_match_config():
     """/config endpoint must return the values actually in use, not stale copies."""
-    from fastapi.testclient import TestClient
     import api.server as srv
     from config import (
         SCORE_THRESHOLD_HOT, SCORE_THRESHOLD_MEDIUM,
         SCORE_THRESHOLD_SHOW, CONF_SHOW,
     )
-    client = TestClient(srv.app)
-    r = client.get("/config")
-    assert r.status_code == 200
-    body = r.json()
+    # Call the endpoint function directly. This contract does not need an ASGI
+    # lifecycle and remains independent of TestClient/httpx version coupling.
+    body = srv.get_config()
     assert body["score_hot"]    == SCORE_THRESHOLD_HOT
     assert body["score_medium"] == SCORE_THRESHOLD_MEDIUM
     assert body["score_show"]   == SCORE_THRESHOLD_SHOW
@@ -73,10 +71,37 @@ def test_impact_tier_boundaries():
     """Boundary values must land in the correct tiers."""
     from config import impact_tier
     assert impact_tier(0.80, 0.00) == "Hot"
-    assert impact_tier(0.00, 0.80) == "Hot"
+    # Historical 1h values must never promote a live item.
+    assert impact_tier(0.00, 0.80) == "Low"
     assert impact_tier(0.55, 0.00) == "Medium"
     assert impact_tier(0.30, 0.00) == "Show"
     assert impact_tier(0.29, 0.29) == "Low"
+
+
+def test_server_live_gate_ignores_historical_1h_score():
+    import api.server as srv
+    item = {"model_score": 0.10, "model_score_1h": 0.99, "confidence": 100}
+    assert srv._live_score(item) == 0.10
+    assert srv._recompute_impact(item) == "Low"
+    assert not srv._passes_display(item)
+
+
+def test_telegram_config_aliases_are_canonical():
+    """main.py must consume config values, not read incompatible env names."""
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert 'os.getenv("BOT_TOKEN")' not in source
+    assert 'os.getenv("SIGNAL_CHANNEL_ID")' not in source
+
+
+def test_dashboard_delivery_has_persistent_outbox():
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "DASHBOARD_OUTBOX_FILE" in source
+    assert "dashboard_delivery_worker_loop" in source
+
+
+def test_qdrant_has_explicit_health_endpoint():
+    source = (ROOT / "api" / "server.py").read_text(encoding="utf-8")
+    assert '@app.get("/health/qdrant")' in source
 
 
 # ── 3. Feature dimension contract ─────────────────────────────────────────────
@@ -90,8 +115,8 @@ def test_build_xgb_features_dimension():
     except ImportError:
         import pytest; pytest.skip("xgboost not installed")
 
-    clf_path    = ROOT / "xgb_impact_clf_15m_bert.json"
-    scaler_path = ROOT / "xgb_feature_scaler_bert.pkl"
+    clf_path    = ROOT / "xgb_impact_clf_15m_bert_rag.json"
+    scaler_path = ROOT / "xgb_feature_scaler_bert_rag.pkl"
     if not clf_path.exists() or not scaler_path.exists():
         import pytest; pytest.skip("model files not present")
 
@@ -118,8 +143,29 @@ def test_build_xgb_features_dimension():
         "net_agreement", "sentiment_score", "weight", "confidence",
     ]}
     dummy_macro = np.zeros(8, dtype=np.float32)
-    features = build_xgb_features(dummy_sent, dummy_emb, dummy_emb, dummy_macro)
+    dummy_rag = np.zeros(10, dtype=np.float32)
+    features = build_xgb_features(
+        dummy_sent, dummy_emb, dummy_emb, dummy_macro, dummy_rag
+    )
     assert features.shape[0] == n_model, (
         f"build_xgb_features produced {features.shape[0]} dims, model expects {n_model}. "
         "Check RAG padding in build_xgb_features."
     )
+
+
+def test_canonical_bert_rag_feature_contract():
+    """The production contract remains 1,578 values with 10 RAG features."""
+    from pipeline.feature_contract import RAG_DIM, TOTAL_DIM, SENTIMENT_KEYS
+    assert RAG_DIM == 10
+    assert len(SENTIMENT_KEYS) == 13
+    assert TOTAL_DIM == 1578
+
+
+def test_qdrant_ids_are_uuid_compatible():
+    """Both bot and API fallback IDs must provide 32 hexadecimal characters."""
+    import re
+    api_src = (ROOT / "api" / "server.py").read_text()
+    main_src = (ROOT / "main.py").read_text()
+    assert "hexdigest()[:32]" in api_src
+    assert "hexdigest()[:32]" in main_src
+    assert re.fullmatch(r"[0-9a-f]{32}", __import__("hashlib").sha1(b"contract").hexdigest()[:32])

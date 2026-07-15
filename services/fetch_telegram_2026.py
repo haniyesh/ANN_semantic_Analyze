@@ -312,11 +312,12 @@ def build_features(msgs, cb_emb, fb_emb, cb_probs, fb_probs, rb_probs,
 # ── 4. Load XGBoost v9 and score ─────────────────────────────────
 
 def load_xgb_v9():
-    clf15 = xgb.XGBClassifier(); clf15.load_model(str(ROOT / "xgb_impact_clf_15m_bert.json"))
-    clf1h = xgb.XGBClassifier(); clf1h.load_model(str(ROOT / "xgb_impact_clf_1h_bert.json"))
-    with open(ROOT / "xgb_feature_scaler_bert.pkl", "rb") as f:
+    # This backfill builder intentionally uses the one-dummy non-RAG layout.
+    clf15 = xgb.XGBClassifier(); clf15.load_model(str(ROOT / "xgb_impact_clf_15m_bert_norag.json"))
+    clf1h = xgb.XGBClassifier(); clf1h.load_model(str(ROOT / "xgb_impact_clf_1h_bert_norag.json"))
+    with open(ROOT / "xgb_feature_scaler_bert_norag.pkl", "rb") as f:
         scaler = pickle.load(f)
-    res = json.loads((ROOT / "xgb_bert_results.json").read_text())
+    res = json.loads((ROOT / "xgb_bert_norag_results.json").read_text())
     thr15 = res.get("threshold_15m", 0.295)
     thr1h  = res.get("threshold_1h",  0.265)
     print(f"  XGBoost v9 loaded  thresh15={thr15:.3f}  thresh1h={thr1h:.3f}")

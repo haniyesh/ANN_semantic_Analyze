@@ -12,7 +12,7 @@ Pipeline:
     -> services/sentiment_score.py     (3-model ensemble sentiment columns)
        => news_cleaned_filtered_scored.csv
     -> training/xgboost_train_bert.py   (embeddings, RAG, train, evaluate)
-       => xgb_impact_clf_15m_bert.json, xgb_impact_clf_1h_bert.json, xgb_feature_scaler_bert.pkl, xgb_bert_results.json
+       => variant-specific *_bert_rag.* or *_bert_norag.* artifacts
 
 Required raw inputs (NOT committed — download from Kaggle into repo root):
   - bitcoin_sentiments_21_24.csv

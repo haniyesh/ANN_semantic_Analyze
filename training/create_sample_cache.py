@@ -22,7 +22,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
 
 ROOT = Path(__file__).parent.parent  # project root
 sys.path.insert(0, str(ROOT))
@@ -39,6 +38,7 @@ def _hash(title: str) -> str:
 
 
 def _load_bert_models(force_cpu: bool = False):
+    import torch
     from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification
     # Force CPU when CUDA compute capability doesn't match the PyTorch build
     if force_cpu:
@@ -62,13 +62,15 @@ def _load_bert_models(force_cpu: bool = False):
 
     print("  Loading FinBERT...")
     fb_tok = AutoTokenizer.from_pretrained("ProsusAI/finbert")
-    fb_mdl = AutoModel.from_pretrained("ProsusAI/finbert").eval().to(device)
+    fb_emb = AutoModel.from_pretrained("ProsusAI/finbert").eval().to(device)
+    fb_cls = AutoModelForSequenceClassification.from_pretrained("ProsusAI/finbert").eval().to(device)
 
     return {"cb_tok": cb_tok, "cb_emb": cb_emb, "cb_cls": cb_cls,
-            "fb_tok": fb_tok, "fb_mdl": fb_mdl, "device": device}
+            "fb_tok": fb_tok, "fb_emb": fb_emb, "fb_cls": fb_cls, "device": device}
 
 
 def _encode(models: dict, title: str):
+    import torch
     device = models["device"]
     inp_cb = models["cb_tok"](title, padding=True, truncation=True,
                               max_length=128, return_tensors="pt")
@@ -82,13 +84,16 @@ def _encode(models: dict, title: str):
                               max_length=128, return_tensors="pt")
     inp_fb = {k: v.to(device) for k, v in inp_fb.items()}
     with torch.no_grad():
-        fb_embedding = models["fb_mdl"](**inp_fb).last_hidden_state[:, 0, :].cpu().numpy().flatten()
+        fb_embedding = models["fb_emb"](**inp_fb).last_hidden_state[:, 0, :].cpu().numpy().flatten()
+        fb_probs     = torch.softmax(models["fb_cls"](**inp_fb).logits, dim=1).cpu().numpy()[0]
 
-    return cb_embedding.astype(np.float32), cb_probs, fb_embedding.astype(np.float32)
+    return cb_embedding.astype(np.float32), cb_probs, fb_embedding.astype(np.float32), fb_probs
 
 
-def _build_sentiment(cb_probs: np.ndarray) -> dict:
+def _build_sentiment(cb_probs: np.ndarray, fb_probs: np.ndarray) -> dict:
     cb_neg, cb_neu, cb_pos = float(cb_probs[0]), float(cb_probs[1]), float(cb_probs[2])
+    # FinBERT label order: positive=0, negative=1, neutral=2
+    fb_pos, fb_neg, fb_neu = float(fb_probs[0]), float(fb_probs[1]), float(fb_probs[2])
     net = cb_pos - cb_neg
     if cb_neu > max(cb_pos, cb_neg):
         sentiment, confidence, disc = "neutral", cb_neu, 0
@@ -109,22 +114,32 @@ def _build_sentiment(cb_probs: np.ndarray) -> dict:
         "cb_prob_pos":     round(cb_pos, 4),
         "cb_prob_neg":     round(cb_neg, 4),
         "cb_prob_neu":     round(cb_neu, 4),
+        "fb_prob_pos":     round(fb_pos, 4),
+        "fb_prob_neg":     round(fb_neg, 4),
+        "fb_prob_neu":     round(fb_neu, 4),
     }
 
 
-def _build_features(cb_emb, fb_emb, sent: dict, pub_dt: datetime) -> np.ndarray:
+def _build_features(
+    cb_emb,
+    fb_emb,
+    sent: dict,
+    pub_dt: datetime,
+    rag_features: np.ndarray | None = None,
+) -> np.ndarray:
     from training.xgboost_train_bert import crypto_news_type_classify
+    from pipeline.feature_contract import build_bert_rag_features
     type_probs = crypto_news_type_classify(cb_emb.reshape(1, -1))[0]
 
-    sent_vec = np.array([
-        sent["cb_prob_pos"], sent["cb_prob_neg"], sent["cb_prob_neu"],
-        sent["cb_prob_pos"], sent["cb_prob_neg"], sent["cb_prob_neu"],
-        sent["cb_prob_pos"], sent["cb_prob_neg"], sent["cb_prob_neu"],
-        sent["cb_prob_pos"] - sent["cb_prob_neg"],
-        sent["sentiment_score"],
-        float(sent["weight"]),
-        sent["confidence"] / 100.0,
-    ], dtype=np.float32)
+    feature_sent = dict(sent)
+    feature_sent.setdefault("rb_prob_pos", 0.0)
+    feature_sent.setdefault("rb_prob_neg", 0.0)
+    feature_sent.setdefault("rb_prob_neu", 0.0)
+    feature_sent.setdefault(
+        "net_agreement", sent["cb_prob_pos"] - sent["cb_prob_neg"]
+    )
+    # Cache/analyzer sentiment confidence is stored as a percentage.
+    feature_sent["confidence"] = float(sent["confidence"]) / 100.0
 
     hour = pub_dt.hour
     dow  = pub_dt.weekday()
@@ -136,7 +151,10 @@ def _build_features(cb_emb, fb_emb, sent: dict, pub_dt: datetime) -> np.ndarray:
         0.0, 0.0, 0.0, 0.5,
     ], dtype=np.float32)
 
-    return np.concatenate([cb_emb, fb_emb, sent_vec, type_probs, macro])
+    rag = rag_features if rag_features is not None else np.zeros(10, dtype=np.float32)
+    return build_bert_rag_features(
+        feature_sent, cb_emb, fb_emb, type_probs, macro, rag
+    )
 
 
 def _query_rag(title: str, published_ts: int) -> np.ndarray:
@@ -166,20 +184,25 @@ def _query_rag(title: str, published_ts: int) -> np.ndarray:
 
 def _load_xgb():
     import pickle, xgboost as xgb
-    clf15 = xgb.XGBClassifier(); clf15.load_model(str(ROOT / "xgb_impact_clf_15m_bert.json"))
-    clf1h = xgb.XGBClassifier(); clf1h.load_model(str(ROOT / "xgb_impact_clf_1h_bert.json"))
-    with open(ROOT / "xgb_feature_scaler_bert.pkl", "rb") as f:
-        import pickle
+    clf15 = xgb.XGBClassifier(); clf15.load_model(str(ROOT / "xgb_impact_clf_15m_bert_rag.json"))
+    with open(ROOT / "xgb_feature_scaler_bert_rag.pkl", "rb") as f:
         scaler = pickle.load(f)
 
-    thr15, thr1h = 0.295, 0.265
-    res_path = ROOT / "xgb_bert_results.json"
+    expected = clf15.n_features_in_
+    if scaler.n_features_in_ != expected:
+        raise RuntimeError(
+            "15-minute RAG artifacts do not share one feature layout: "
+            f"model={expected}, scaler={scaler.n_features_in_}"
+        )
+
+    thr15, thr1h = 0.51, 1.0
+    res_path = ROOT / "xgb_bert_rag_results.json"
     if res_path.exists():
         res = json.loads(res_path.read_text())
         thr15 = res.get("threshold_15m", thr15)
         thr1h = res.get("threshold_1h",  thr1h)
 
-    return clf15, clf1h, scaler, thr15, thr1h
+    return clf15, None, scaler, thr15, thr1h
 
 
 # ── Main ──────────────────────────────────────────────────────────
@@ -259,8 +282,8 @@ def main():
             print(f"  {i}/{len(df)}  ({i*100//len(df)}%)...")
 
         try:
-            cb_emb, cb_probs, fb_emb = _encode(bert, title)
-            sent = _build_sentiment(cb_probs)
+            cb_emb, cb_probs, fb_emb, fb_probs = _encode(bert, title)
+            sent = _build_sentiment(cb_probs, fb_probs)
 
             if args.skip_rag:
                 rag = np.zeros(10, dtype=np.float32)
@@ -268,16 +291,21 @@ def main():
                 try:
                     rag = _query_rag(title, pub_ts)
                 except Exception:
-                    rag = np.zeros(10, dtype=np.float32)  # 10-dim fallback matches RAG-trained scaler
+                    rag = np.zeros(10, dtype=np.float32)
 
-            features = _build_features(cb_emb, fb_emb, sent, pub_dt)
-            features = np.concatenate([features, rag]).astype(np.float32)
+            features = _build_features(cb_emb, fb_emb, sent, pub_dt, rag)
+
+            if features.shape[0] != clf15.n_features_in_:
+                raise ValueError(
+                    f"Built {features.shape[0]} features, but the deployed model "
+                    f"expects {clf15.n_features_in_}"
+                )
 
             X    = scaler.transform(features.reshape(1, -1)).astype(np.float32)
             p15  = float(clf15.predict_proba(X)[0, 1])
-            p1h  = float(clf1h.predict_proba(X)[0, 1])
+            p1h  = 0.0
             pred15 = int(p15 >= thr15)
-            pred1h = int(p1h >= thr1h)
+            pred1h = 0
             impact = _impact_tier(p15, p1h)
 
             results.append({
