@@ -152,6 +152,41 @@ def test_custom_analyzer_auth_fails_closed_before_inference():
         assert srv._require_analyze_key("expected-secret") is None
 
 
+def test_huggingface_production_revisions_are_immutable():
+    import re
+    from services import model_refs
+
+    for name in ("CRYPTOBERT_REVISION", "FINBERT_REVISION", "ROBERTA_REVISION", "BGE_REVISION"):
+        assert re.fullmatch(r"[0-9a-f]{40}", getattr(model_refs, name))
+    sentiment_source = (ROOT / "services" / "sentiment_score.py").read_text(encoding="utf-8")
+    assert "revision=CRYPTOBERT_REVISION" in sentiment_source
+    assert "revision=FINBERT_REVISION" in sentiment_source
+    assert "revision=ROBERTA_REVISION" in sentiment_source
+    rag_source = (ROOT / "pipeline" / "rag_news.py").read_text(encoding="utf-8")
+    assert "revision=BGE_REVISION" in rag_source
+
+
+def test_operational_queues_are_bounded_and_single_instance():
+    source = (ROOT / "main.py").read_text(encoding="utf-8")
+    assert "DASHBOARD_OUTBOX_MAX_ITEMS" in source
+    assert "DASHBOARD_OUTBOX_MAX_ATTEMPTS" in source
+    assert "DASHBOARD_DEAD_LETTER_FILE" in source
+    assert "operational_alert_loop" in source
+    assert "fcntl.LOCK_EX | fcntl.LOCK_NB" in source
+
+
+def test_live_payload_has_no_one_hour_prediction_fields():
+    import inspect
+    import main
+
+    run_model_source = inspect.getsource(main.run_model)
+    process_source = inspect.getsource(main.process_news_item)
+    assert "model_score_1h" not in run_model_source
+    assert '"model_score_1h"' not in process_source
+    assert '"pred_1h"' not in process_source
+    assert '"btc_change_1h"' not in process_source
+
+
 # ── 3. Feature dimension contract ─────────────────────────────────────────────
 
 def test_build_xgb_features_dimension():

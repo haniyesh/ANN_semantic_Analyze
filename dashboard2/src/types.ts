@@ -22,7 +22,6 @@ export interface NewsItem {
   confidence?: number;     // 0–100
   weight?: number;
   model_score?: number;    // 15m impact score
-  model_score_1h?: number; // 1h impact score
   score_normalized?: boolean;
   prob_positive?: number;
   prob_negative?: number;

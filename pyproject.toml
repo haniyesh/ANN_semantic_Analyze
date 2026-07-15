@@ -20,7 +20,6 @@ ignore = ["E501", "E402", "F401", "F841", "W291", "W293"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
 markers = [
     "slow: marks tests as slow (ML model loads, network calls)",
     "requires_models: tests that need torch / HuggingFace models on disk",

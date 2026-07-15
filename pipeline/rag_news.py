@@ -32,6 +32,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastembed import TextEmbedding
+from huggingface_hub import snapshot_download
+from services.model_refs import BGE_MODEL, BGE_ONNX_REPO, BGE_REVISION
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance, VectorParams, PointStruct,
@@ -43,7 +45,7 @@ load_dotenv()
 # ── Config ────────────────────────────────────────────────────────
 COLLECTION_NAME      = "crypto_news"
 VECTOR_SIZE          = 384
-EMBED_MODEL          = "BAAI/bge-small-en-v1.5"
+EMBED_MODEL          = BGE_MODEL
 TOP_K                = 10
 BATCH_SIZE           = 50
 IMPACT_THRESHOLD_15M = 0.5
@@ -77,7 +79,11 @@ def get_embedder() -> TextEmbedding:
     with _embedder_lock:
         if _embedder is None:
             print(f"  Loading embedding model: {EMBED_MODEL}...")
-            _embedder = TextEmbedding(EMBED_MODEL)
+            model_path = snapshot_download(
+                repo_id=BGE_ONNX_REPO,
+                revision=BGE_REVISION,
+            )
+            _embedder = TextEmbedding(EMBED_MODEL, specific_model_path=model_path)
         return _embedder
 
 

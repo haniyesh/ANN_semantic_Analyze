@@ -204,6 +204,13 @@ It builds all images and checks PostgreSQL, API/model health, dashboard,
 artifact checksums, Qdrant RAG connectivity, and the bot heartbeat. It tears
 the stack down afterward; set `KEEP_STACK=1` to leave a successful stack up.
 
+The bot intentionally supports one replica while durable queues remain JSON
+files. An OS-level lock makes additional replicas fail fast instead of corrupting
+those queues. Dashboard delivery is capped at 1,000 pending items and 12 attempts;
+terminal failures move to `storage/dashboard_dead_letter.json`. With `ADMIN_ID`
+and `TELEGRAM_BOT_TOKEN` configured, queue and dead-letter problems generate
+cooldown-limited Telegram administrator alerts.
+
 ---
 
 ## Project Structure

@@ -89,8 +89,9 @@ def _build_proto_matrix():
     import torch.nn.functional as F
     from transformers import AutoTokenizer, AutoModel
     print("  Building news type prototype embeddings (one-time)...")
-    tok = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
-    mdl = AutoModel.from_pretrained("ElKulako/cryptobert").eval()
+    from services.model_refs import CRYPTOBERT_MODEL, CRYPTOBERT_REVISION
+    tok = AutoTokenizer.from_pretrained(CRYPTOBERT_MODEL, revision=CRYPTOBERT_REVISION)
+    mdl = AutoModel.from_pretrained(CRYPTOBERT_MODEL, revision=CRYPTOBERT_REVISION).eval()
     proto_embs = []
     for label in NEWS_TYPE_LABELS:
         sentences = _NEWS_TYPE_PROTOTYPES_TEXT[label]

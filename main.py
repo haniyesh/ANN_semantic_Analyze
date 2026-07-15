@@ -53,7 +53,9 @@ from config import (
     impact_tier,
     BOT_TOKEN,
     CHANNEL_ID,
+    ADMIN_ID,
 )
+from services.model_refs import FINBERT_MODEL, FINBERT_REVISION
 
 from bot.telegram_listener import start as start_telegram_listener
 from services.price_fetcher import PriceTracker, extract_coin_from_text, get_price_at_times, calculate_movement
@@ -74,6 +76,11 @@ RAG_PENDING_FILE = Path(__file__).parent / "storage" / "rag_pending_outcomes.jso
 RAG_DEAD_LETTER_FILE = Path(__file__).parent / "storage" / "rag_dead_letter.json"
 BOT_HEALTH_FILE = Path(__file__).parent / "storage" / "bot_health.json"
 DASHBOARD_OUTBOX_FILE = Path(__file__).parent / "storage" / "dashboard_outbox.json"
+DASHBOARD_DEAD_LETTER_FILE = Path(__file__).parent / "storage" / "dashboard_dead_letter.json"
+BOT_INSTANCE_LOCK_FILE = Path(__file__).parent / "storage" / "bot.lock"
+DASHBOARD_OUTBOX_MAX_ITEMS = 1000
+DASHBOARD_OUTBOX_MAX_ATTEMPTS = 12
+OPERATIONAL_ALERT_COOLDOWN_SECONDS = 30 * 60
 RAG_OUTCOME_DELAY_SECONDS = 20 * 60
 RAG_RETRY_SECONDS = 5 * 60
 RAG_MAX_RETRIES = 12
@@ -85,6 +92,8 @@ _bot_started_at = int(time_module.time())
 _last_rag_query_at = 0
 _last_inference_at = 0
 _last_dashboard_delivery_at = 0
+_instance_lock_handle = None
+_last_operational_alert: dict[str, int] = {}
 
 FETCH_INTERVAL = 60
 # BATCH_SIZE is imported from config — do not shadow it here
@@ -206,8 +215,8 @@ def _load_model():
 
     # Load FinBERT for live embeddings — always CPU to avoid CUDA capability mismatch
     from transformers import AutoTokenizer, AutoModel
-    fb_tok = AutoTokenizer.from_pretrained("ProsusAI/finbert")
-    fb_mdl = AutoModel.from_pretrained("ProsusAI/finbert").eval().to("cpu")
+    fb_tok = AutoTokenizer.from_pretrained(FINBERT_MODEL, revision=FINBERT_REVISION)
+    fb_mdl = AutoModel.from_pretrained(FINBERT_MODEL, revision=FINBERT_REVISION).eval().to("cpu")
 
     thr15 = 0.51
     res_path = ROOT_DIR / "xgb_bert_rag_results.json"
@@ -237,7 +246,7 @@ def run_model(features: np.ndarray) -> dict:
     """Run XGBoost BERT on the feature vector produced by build_xgb_features."""
     bundle = _load_model()
     if not bundle:
-        return {"model_score": 0.0, "model_score_1h": 0.0, "pred_15m": 0, "pred_1h": 0,
+        return {"model_score": 0.0, "pred_15m": 0,
                 "prob_15m": 0.0, "reg_pred_15m": 0.0, "confidence_model": 0.0}
 
     n_exp = bundle["n_features"]
@@ -252,9 +261,7 @@ def run_model(features: np.ndarray) -> dict:
 
     return {
         "model_score":      round(p15, 4),
-        "model_score_1h":   0.0,
         "pred_15m":         int(p15 >= bundle["thresh15"]),
-        "pred_1h":          0,
         "prob_15m":         round(p15, 4),
         "reg_pred_15m":     0.0,
         "confidence_model": round(p15, 4),
@@ -497,6 +504,20 @@ def _write_dashboard_outbox(items: list[dict]) -> None:
     tmp.replace(DASHBOARD_OUTBOX_FILE)
 
 
+def _append_json_list(path: Path, item: dict) -> None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        if not isinstance(data, list):
+            data = []
+    except (OSError, json.JSONDecodeError):
+        data = []
+    data.append(item)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data[-DASHBOARD_OUTBOX_MAX_ITEMS:], ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
 def _get_dashboard_outbox_lock() -> asyncio.Lock:
     global _dashboard_outbox_lock
     if _dashboard_outbox_lock is None:
@@ -514,6 +535,11 @@ async def _enqueue_dashboard_delivery(payload: dict) -> None:
             "attempts": 0,
             "next_attempt_at": int(time_module.time()) + 30,
         })
+        while len(items) > DASHBOARD_OUTBOX_MAX_ITEMS:
+            dropped = items.pop(0)
+            dropped["dead_letter_reason"] = "outbox capacity exceeded"
+            dropped["failed_at"] = int(time_module.time())
+            await asyncio.to_thread(_append_json_list, DASHBOARD_DEAD_LETTER_FILE, dropped)
         await asyncio.to_thread(_write_dashboard_outbox, items)
 
 
@@ -541,11 +567,20 @@ async def dashboard_delivery_worker_loop() -> None:
                 if delivered:
                     current = [q for q in current if q.get("payload", {}).get("id") != match_id]
                 else:
+                    dead = None
                     for q in current:
                         if q.get("payload", {}).get("id") == match_id:
                             q["attempts"] = int(q.get("attempts", 0)) + 1
-                            delay = min(30 * (2 ** min(q["attempts"], 7)), 3600)
-                            q["next_attempt_at"] = int(time_module.time()) + delay
+                            if q["attempts"] >= DASHBOARD_OUTBOX_MAX_ATTEMPTS:
+                                q["dead_letter_reason"] = "maximum delivery attempts exceeded"
+                                q["failed_at"] = int(time_module.time())
+                                dead = dict(q)
+                            else:
+                                delay = min(30 * (2 ** min(q["attempts"], 7)), 3600)
+                                q["next_attempt_at"] = int(time_module.time()) + delay
+                    if dead is not None:
+                        current = [q for q in current if q.get("payload", {}).get("id") != match_id]
+                        await asyncio.to_thread(_append_json_list, DASHBOARD_DEAD_LETTER_FILE, dead)
                 await asyncio.to_thread(_write_dashboard_outbox, current)
         await asyncio.sleep(15)
 
@@ -707,10 +742,6 @@ async def process_news_item(news: dict):
     model_score    = _normalize_score(
         model_result["model_score"], SCORE_15M_MIN, SCORE_15M_MAX
     )
-    model_score_1h = _normalize_score(
-        model_result.get("model_score_1h", 0.0), SCORE_1H_MIN, SCORE_1H_MAX
-    )
-
     # ── Step 5: Build payload ─────────────────────────────────────
     signal_type = (
         "BUY"  if sent["sentiment_score"] > 1  else
@@ -735,17 +766,14 @@ async def process_news_item(news: dict):
         "prob_positive":    sent["prob_positive"],
         "prob_negative":    sent["prob_negative"],
         "model_score":      model_score,
-        "model_score_1h":   model_score_1h,
         "score_normalized": True,
         "pred_15m":         model_result["pred_15m"],
-        "pred_1h":          model_result["pred_1h"],
         "confidence_model": model_result.get("confidence_model", 0.0),
-        "impact":           impact_tier(model_score, model_score_1h),
+        "impact":           impact_tier(model_score),
         "age_minutes":      round(age_minutes, 1),
         "published_ts":     published_ts,
         "link":             news.get("link", ""),
         "btc_change_15m":   0.0,
-        "btc_change_1h":    0.0,
         "price":            news.get("btc_price", 0.0),
         "rag_hit_rate":     float(rag_features[3]) if len(rag_features) > 3 else 0.0,
         "rag_avg_change":   float(rag_features[0]) if len(rag_features) > 0 else 0.0,
@@ -962,6 +990,81 @@ async def bot_heartbeat_loop() -> None:
         await asyncio.sleep(30)
 
 
+async def _send_operational_alert(key: str, message: str) -> None:
+    """Send cooldown-limited administrator alerts without crashing the bot."""
+    now = int(time_module.time())
+    if now - _last_operational_alert.get(key, 0) < OPERATIONAL_ALERT_COOLDOWN_SECONDS:
+        return
+    if not BOT_TOKEN or not ADMIN_ID:
+        _log.error("OPERATIONAL ALERT [%s] %s", key, message)
+        _last_operational_alert[key] = now
+        return
+    try:
+        from telegram import Bot
+        await Bot(token=BOT_TOKEN).send_message(
+            chat_id=ADMIN_ID, text=f"⚠️ Crypto News operational alert\n\n{message}"
+        )
+        _last_operational_alert[key] = now
+    except Exception as exc:
+        _log.error("Operational alert delivery failed: %s", exc)
+
+
+async def operational_alert_loop() -> None:
+    """Alert on queues/dead letters and stale delivery while respecting cooldowns."""
+    while True:
+        try:
+            outbox = await asyncio.to_thread(_read_dashboard_outbox)
+            rag = await asyncio.to_thread(_read_rag_pending)
+            for key, path in (
+                ("dashboard-dead-letter", DASHBOARD_DEAD_LETTER_FILE),
+                ("rag-dead-letter", RAG_DEAD_LETTER_FILE),
+            ):
+                try:
+                    dead = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+                except (OSError, json.JSONDecodeError):
+                    dead = []
+                if dead:
+                    await _send_operational_alert(key, f"{path.name} contains {len(dead)} failed jobs.")
+            if len(outbox) >= int(DASHBOARD_OUTBOX_MAX_ITEMS * 0.8):
+                await _send_operational_alert(
+                    "dashboard-outbox-high",
+                    f"Dashboard delivery outbox is {len(outbox)}/{DASHBOARD_OUTBOX_MAX_ITEMS} full.",
+                )
+            if rag:
+                oldest = min(int(item.get("published_ts", time_module.time())) for item in rag)
+                age = int(time_module.time()) - oldest
+                if age > 2 * 60 * 60:
+                    await _send_operational_alert(
+                        "rag-backlog-stale", f"Oldest pending RAG outcome is {age // 60} minutes old."
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.error("Operational alert check failed: %s", exc)
+        await asyncio.sleep(60)
+
+
+def _acquire_single_instance_lock() -> None:
+    """Prevent multiple bot processes from corrupting JSON-backed queues."""
+    global _instance_lock_handle
+    import fcntl
+
+    BOT_INSTANCE_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    handle = BOT_INSTANCE_LOCK_FILE.open("a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        handle.close()
+        raise RuntimeError(
+            "Another bot instance owns storage/bot.lock; JSON queues require a single bot replica"
+        ) from exc
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    _instance_lock_handle = handle
+
+
 # ══════════════════════════════════════════════════════════════════
 # PROCESSOR LOOP
 # ══════════════════════════════════════════════════════════════════
@@ -1058,6 +1161,7 @@ async def main():
     _rag_pending_lock = None
     _dashboard_outbox_lock = None
     shutdown_event = asyncio.Event()
+    _acquire_single_instance_lock()
 
     def _request_shutdown() -> None:
         global _shutdown
@@ -1101,6 +1205,7 @@ async def main():
         asyncio.create_task(rag_outcome_worker_loop(), name="rag-outcome-worker"),
         asyncio.create_task(dashboard_delivery_worker_loop(), name="dashboard-delivery-worker"),
         asyncio.create_task(bot_heartbeat_loop(), name="bot-heartbeat"),
+        asyncio.create_task(operational_alert_loop(), name="operational-alerts"),
     }
     stop_task = asyncio.create_task(shutdown_event.wait(), name="shutdown-waiter")
 

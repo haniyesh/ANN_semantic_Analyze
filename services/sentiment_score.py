@@ -35,6 +35,11 @@ from transformers import (
 )
 
 hf_logging.set_verbosity_error()
+from services.model_refs import (
+    CRYPTOBERT_MODEL, CRYPTOBERT_REVISION,
+    FINBERT_MODEL, FINBERT_REVISION,
+    ROBERTA_MODEL, ROBERTA_REVISION,
+)
 
 BATCH_SIZE = 32
 SAVE_EVERY = 500
@@ -86,9 +91,11 @@ def load_models():
 
     # CryptoBERT — used for type classification AND crypto sentiment
     print("  [1/3] CryptoBERT (embedding + classifier)...")
-    cb_tok  = AutoTokenizer.from_pretrained("ElKulako/cryptobert")
-    cb_emb  = AutoModel.from_pretrained("ElKulako/cryptobert")              # for embeddings
-    cb_cls  = AutoModelForSequenceClassification.from_pretrained("ElKulako/cryptobert")  # for sentiment
+    cb_tok = AutoTokenizer.from_pretrained(CRYPTOBERT_MODEL, revision=CRYPTOBERT_REVISION)
+    cb_emb = AutoModel.from_pretrained(CRYPTOBERT_MODEL, revision=CRYPTOBERT_REVISION)
+    cb_cls = AutoModelForSequenceClassification.from_pretrained(
+        CRYPTOBERT_MODEL, revision=CRYPTOBERT_REVISION
+    )
     cb_emb.eval()
     cb_cls.eval()
 
@@ -106,13 +113,14 @@ def load_models():
 
     # FinBERT — financial domain sentiment
     print("  [2/3] FinBERT...")
-    fb_pipe = pipeline("text-classification", model="ProsusAI/finbert",
+    fb_pipe = pipeline("text-classification", model=FINBERT_MODEL,
+                       revision=FINBERT_REVISION,
                        return_all_scores=True, device=-1)
 
     # RoBERTa — social/commentary sentiment
     print("  [3/3] RoBERTa...")
     rb_pipe = pipeline("text-classification",
-                       model="cardiffnlp/twitter-roberta-base-sentiment-latest",
+                       model=ROBERTA_MODEL, revision=ROBERTA_REVISION,
                        return_all_scores=True, device=-1)
 
     _cache = {

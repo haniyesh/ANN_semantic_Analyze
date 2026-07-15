@@ -90,7 +90,7 @@ const _cfg = {
   reliableChannels: new Set(["the_block_crypto", "coindesk", "cointelegraph", "WatcherGuru", "google_news"]),
 };
 
-function scoreTier(score15, conf, score1h) {
+function scoreTier(score15, conf) {
   const s = Math.abs(score15 || 0);
   const c = conf || 0;
   if (c < _cfg.confMin)   return "Hidden";
@@ -123,7 +123,7 @@ function newsTier(item) {
   return               { tier: "Regular", score: pct };
 }
 
-function signalAction(type, modelScore, modelScore1h) {
+function signalAction(type, modelScore) {
   const s = Math.abs(modelScore || 0);
   if (type === "BUY")  return s >= _cfg.scoreHot ? "Strong Buy"  : "Buy";
   if (type === "SELL") return s >= _cfg.scoreHot ? "Strong Sell" : "Sell";
@@ -136,7 +136,6 @@ function clientNormalize(item) {
   return {
     ...item,
     model_score:    norm(Math.abs(item.model_score    || 0), 0.50, 0.90),
-    model_score_1h: item.model_score_1h,
     score_normalized: true,
   };
 }
@@ -748,8 +747,7 @@ function ExplainPanel({ selectedNews: item, onClose }) {
   }, [item?.id]);
 
   const score      = item ? Math.abs(item.model_score || 0) : 0;
-  const score1h    = item ? Math.abs(item.model_score_1h || 0) : 0;
-  const _tier      = item ? scoreTier(score, item.confidence, score1h) : "Hidden";
+  const _tier      = item ? scoreTier(score, item.confidence) : "Hidden";
   const impactClr  = _tier === "Hot" ? COLORS.red : _tier === "Medium" ? "#f97316" : COLORS.muted;
   const impactLbl  = _tier === "Hot" ? "Hot" : _tier === "Medium" ? "Medium" : _tier === "Show" ? "Show" : "Low";
   const sentClr    = { positive: COLORS.green, negative: COLORS.red, neutral: COLORS.muted };
@@ -932,8 +930,7 @@ function NewsModal({ item, onClose }) {
   const [simLoading, setSimLoading] = useState(false);
 
   const score   = Math.abs(item.model_score || 0);
-  const score1h = Math.abs(item.model_score_1h || 0);
-  const _t    = scoreTier(score, item.confidence, score1h);
+  const _t = scoreTier(score, item.confidence);
   const impactColor = _t === "Hot" ? COLORS.red : _t === "Medium" ? "#f97316" : COLORS.muted;
   const impactLabel = _t === "Hot" ? "Hot" : _t === "Medium" ? "Medium" : _t === "Show" ? "Show" : "Low";
 
@@ -1191,8 +1188,7 @@ function NewsCard({ item, onClick }) {
         <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
           {(() => {
             const s   = Math.abs(item.model_score || 0);
-            const s1h = Math.abs(item.model_score_1h || 0);
-            const tier = scoreTier(s, item.confidence, s1h);
+            const tier = scoreTier(s, item.confidence);
             const clr  = tier === "Hot" ? COLORS.red : tier === "Medium" ? "#f97316" : COLORS.muted;
             const dots = tier === "Hot" ? "●●●" : tier === "Medium" ? "●●" : "●";
             return (
@@ -1246,7 +1242,7 @@ function NewsCard({ item, onClick }) {
 }
 
 function SignalCard({ item }) {
-  const action = signalAction(item.type, item.model_score, item.model_score_1h);
+  const action = signalAction(item.type, item.model_score);
   const actionColors = { "Strong Buy": COLORS.green, "Buy": COLORS.blue, "Strong Sell": COLORS.red, "Sell": COLORS.red, "Neutral": COLORS.muted };
   const color  = actionColors[action] || COLORS.muted;
   const age    = itemTime(item);
@@ -2354,8 +2350,8 @@ export default function CryptoDashboard() {
     localDateKey(mostRecentDayNews[0].published_ts || mostRecentDayNews[0].received_at || 0) === todayLocal;
 
   // Tab filters — live impact badges use only the production 15-minute score.
-  const hotTabNews       = newsForDate(n => passesFilter(n) && scoreTier(Math.abs(n.model_score || 0), n.confidence, Math.abs(n.model_score_1h || 0)) === "Hot");
-  const importantTabNews = newsForDate(n => passesFilter(n) && scoreTier(Math.abs(n.model_score || 0), n.confidence, Math.abs(n.model_score_1h || 0)) === "Medium");
+  const hotTabNews       = newsForDate(n => passesFilter(n) && scoreTier(Math.abs(n.model_score || 0), n.confidence) === "Hot");
+  const importantTabNews = newsForDate(n => passesFilter(n) && scoreTier(Math.abs(n.model_score || 0), n.confidence) === "Medium");
   const keyTabNews       = newsForDate(n => passesFilter(n) && newsTier(n).tier === "Key");   // Editorially important regardless of price impact
   const allTabNews       = newsForDate(passesFilter);
 

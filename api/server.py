@@ -33,7 +33,6 @@ class IngestNewsItem(BaseModel):
     channel: str = ""
     id: str | None = None
     model_score: float | None = None
-    model_score_1h: float | None = None
     published_ts: int | None = None
     type: str = "NEUTRAL"
     confidence: float = 50.0
@@ -68,9 +67,7 @@ class ExplainRequest(BaseModel):
     sentiment: str = "neutral"
     confidence: float = 50.0
     model_score: float = 0.0
-    model_score_1h: float = 0.0
     btc_change_15m: float = 0.0
-    btc_change_1h: float = 0.0
     channel: str = "unknown"
     similar: list = []
 
@@ -806,6 +803,8 @@ def health(response: Response):
         response.status_code = 503
     pending_path = ROOT / "storage" / "rag_pending_outcomes.json"
     dead_path = ROOT / "storage" / "rag_dead_letter.json"
+    dashboard_outbox_path = ROOT / "storage" / "dashboard_outbox.json"
+    dashboard_dead_path = ROOT / "storage" / "dashboard_dead_letter.json"
     bot_health_path = ROOT / "storage" / "bot_health.json"
     try:
         pending = json.loads(pending_path.read_text(encoding="utf-8")) if pending_path.exists() else []
@@ -824,6 +823,14 @@ def health(response: Response):
         dead_count = len(dead) if isinstance(dead, list) else 0
     except (OSError, json.JSONDecodeError):
         dead_count = None
+    def _list_count(path: Path):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+            return len(data) if isinstance(data, list) else None
+        except (OSError, json.JSONDecodeError):
+            return None
+    dashboard_pending_count = _list_count(dashboard_outbox_path)
+    dashboard_dead_count = _list_count(dashboard_dead_path)
     try:
         bot_health = json.loads(bot_health_path.read_text(encoding="utf-8")) \
             if bot_health_path.exists() else None
@@ -843,6 +850,8 @@ def health(response: Response):
         "rag_pending_outcomes": pending_count,
         "rag_oldest_pending_seconds": oldest_pending_age,
         "rag_dead_letter_count": dead_count,
+        "dashboard_pending_deliveries": dashboard_pending_count,
+        "dashboard_dead_letter_count": dashboard_dead_count,
         "bot_status":           bot_status,
         "bot_heartbeat_age_seconds": bot_heartbeat_age,
         "bot":                  bot_health,
@@ -1386,9 +1395,7 @@ async def explain_news(request: Request, item: ExplainRequest):
     sentiment = item.sentiment
     confidence= item.confidence
     score     = abs(item.model_score)
-    score_1h  = abs(item.model_score_1h)
     btc_15m   = item.btc_change_15m
-    btc_1h    = item.btc_change_1h
     channel   = item.channel
     similar   = item.similar
     max_score = score
@@ -1404,8 +1411,8 @@ async def explain_news(request: Request, item: ExplainRequest):
         sim_block = "Similar historical news:\n" + "\n".join(lines)
 
     btc_block = (
-        f"Actual BTC reaction: {btc_15m:+.2f}% in 15m, {btc_1h:+.2f}% in 1h"
-        if btc_15m != 0 or btc_1h != 0
+        f"Actual BTC reaction: {btc_15m:+.2f}% in 15m"
+        if btc_15m != 0
         else "BTC reaction: data available in cache"
     )
 
@@ -1417,7 +1424,6 @@ Source channel: {channel}
 Model output:
   - Sentiment: {sentiment} (confidence {confidence}%)
   - Impact score (15m): {score*100:.0f}%  → tier: {impact}
-  - Impact score (1h):  {score_1h*100:.0f}%
   - Signal: {"BUY" if sentiment == "positive" else "SELL" if sentiment == "negative" else "NEUTRAL"}
 
 {sim_block}
