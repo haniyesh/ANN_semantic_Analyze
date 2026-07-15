@@ -334,8 +334,16 @@ def build_features(
         )
         print(f"  RAG      : {rag.shape[1]} dims")
 
-    X = np.hstack([cb_emb, fb_emb, sent_df, type_probs, macro, rag]).astype(np.float32)
-    from pipeline.feature_contract import TOTAL_DIM
+    from pipeline.feature_contract import TOTAL_DIM, build_bert_rag_feature_matrix
+    if skip_rag:
+        # The non-RAG experiment intentionally has a different one-dummy layout
+        # and is never a production artifact.
+        X = np.hstack([cb_emb, fb_emb, sent_df, type_probs, macro, rag]).astype(np.float32)
+    else:
+        # Production training uses the exact same row builder as live inference.
+        X = build_bert_rag_feature_matrix(
+            df[sent_cols].fillna(0), cb_emb, fb_emb, type_probs, macro, rag
+        )
     expected_dim = 1569 if skip_rag else TOTAL_DIM
     if X.shape[1] != expected_dim:
         raise ValueError(

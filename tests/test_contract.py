@@ -104,6 +104,23 @@ def test_qdrant_has_explicit_health_endpoint():
     assert '@app.get("/health/qdrant")' in source
 
 
+def test_production_artifact_manifest_checksums():
+    """Fail CI if a model/scaler is replaced without updating its manifest."""
+    import hashlib
+    import json
+
+    manifest = json.loads((ROOT / "model_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["feature_contract"]["total_dimensions"] == 1578
+    assert manifest["feature_contract"]["rag_dimensions"] == 10
+    assert manifest["model"]["xgboost_version"] == "3.2.0"
+    for section in ("model", "scaler"):
+        artifact = ROOT / manifest[section]["path"]
+        actual = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        assert actual == manifest[section]["sha256"], (
+            f"{artifact.name} does not match model_manifest.json"
+        )
+
+
 # ── 3. Feature dimension contract ─────────────────────────────────────────────
 
 def test_build_xgb_features_dimension():
@@ -159,6 +176,29 @@ def test_canonical_bert_rag_feature_contract():
     assert RAG_DIM == 10
     assert len(SENTIMENT_KEYS) == 13
     assert TOTAL_DIM == 1578
+
+
+def test_training_batch_and_live_feature_builders_are_identical():
+    """A deterministic training row must equal live inference byte-for-byte."""
+    import numpy as np
+    from pipeline.feature_contract import (
+        SENTIMENT_KEYS, build_bert_rag_features,
+        build_bert_rag_feature_matrix,
+    )
+
+    sent = {key: float(i + 1) / 100 for i, key in enumerate(SENTIMENT_KEYS)}
+    cb = np.arange(768, dtype=np.float32) / 1000
+    fb = np.arange(768, dtype=np.float32)[::-1] / 1000
+    types = np.arange(11, dtype=np.float32) / 10
+    macro = np.arange(8, dtype=np.float32) / 8
+    rag = np.arange(10, dtype=np.float32) / 10
+
+    live = build_bert_rag_features(sent, cb, fb, types, macro, rag)
+    training = build_bert_rag_feature_matrix(
+        [sent], cb[None, :], fb[None, :], types[None, :],
+        macro[None, :], rag[None, :],
+    )[0]
+    np.testing.assert_array_equal(training, live)
 
 
 def test_qdrant_ids_are_uuid_compatible():

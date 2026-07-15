@@ -53,3 +53,46 @@ def build_bert_rag_features(
     if features.shape[0] != TOTAL_DIM:
         raise AssertionError(f"Feature contract produced {features.shape[0]}, expected {TOTAL_DIM}")
     return features
+
+
+def build_bert_rag_feature_matrix(
+    sentiment_rows,
+    cb_embeddings,
+    fb_embeddings,
+    type_probabilities,
+    macro_rows,
+    rag_rows,
+) -> np.ndarray:
+    """Batch equivalent of :func:`build_bert_rag_features` for training.
+
+    The function intentionally delegates every row to the inference builder.
+    Training therefore cannot silently introduce a different feature order.
+    ``sentiment_rows`` may be a DataFrame or an iterable of dictionaries.
+    """
+    if hasattr(sentiment_rows, "to_dict"):
+        sentiments = sentiment_rows.to_dict(orient="records")
+    else:
+        sentiments = list(sentiment_rows)
+
+    arrays = [
+        np.asarray(cb_embeddings), np.asarray(fb_embeddings),
+        np.asarray(type_probabilities), np.asarray(macro_rows),
+        np.asarray(rag_rows),
+    ]
+    row_count = len(sentiments)
+    for name, values in zip(
+        ("CryptoBERT embeddings", "FinBERT embeddings", "news types", "macro", "RAG"),
+        arrays,
+    ):
+        if values.ndim != 2 or values.shape[0] != row_count:
+            raise ValueError(
+                f"{name} has shape {values.shape}; expected {row_count} rows"
+            )
+
+    return np.stack([
+        build_bert_rag_features(
+            sentiments[i], arrays[0][i], arrays[1][i], arrays[2][i],
+            arrays[3][i], arrays[4][i],
+        )
+        for i in range(row_count)
+    ]).astype(np.float32)

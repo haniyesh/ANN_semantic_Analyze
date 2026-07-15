@@ -187,6 +187,17 @@ For Docker deployment, run both the API and bot services:
 docker compose up --build -d
 ```
 
+Run the complete production smoke test after filling `.env`:
+
+```bash
+chmod +x scripts/smoke_stack.sh
+./scripts/smoke_stack.sh
+```
+
+It builds all images and checks PostgreSQL, API/model health, dashboard,
+artifact checksums, Qdrant RAG connectivity, and the bot heartbeat. It tears
+the stack down afterward; set `KEEP_STACK=1` to leave a successful stack up.
+
 ---
 
 ## Project Structure
