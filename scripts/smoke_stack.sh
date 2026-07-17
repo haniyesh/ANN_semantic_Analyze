@@ -40,8 +40,14 @@ while (( SECONDS < deadline )); do
   unhealthy="$(docker compose ps --format json | python -c '
 import json, sys
 raw = sys.stdin.read().strip()
-data = json.loads(raw) if raw else []
-rows = data if isinstance(data, list) else [data]
+if not raw:
+    rows = []
+else:
+    try:
+        data = json.loads(raw)
+        rows = data if isinstance(data, list) else [data]
+    except json.JSONDecodeError:
+        rows = [json.loads(line) for line in raw.splitlines() if line.strip()]
 bad = [r.get("Service", "?") for r in rows
        if r.get("Health") not in ("", "healthy") or r.get("State") != "running"]
 print(",".join(bad) if len(rows) == 4 else "missing-service")

@@ -73,9 +73,9 @@ def test_impact_tier_boundaries():
     assert impact_tier(0.80, 0.00) == "Hot"
     # Historical 1h values must never promote a live item.
     assert impact_tier(0.00, 0.80) == "Low"
-    assert impact_tier(0.55, 0.00) == "Medium"
-    assert impact_tier(0.30, 0.00) == "Show"
-    assert impact_tier(0.29, 0.29) == "Low"
+    assert impact_tier(0.60, 0.00) == "Medium"  # user-facing High
+    assert impact_tier(0.43, 0.00) == "Show"    # user-facing Medium
+    assert impact_tier(0.42, 0.42) == "Low"
 
 
 def test_server_live_gate_ignores_historical_1h_score():

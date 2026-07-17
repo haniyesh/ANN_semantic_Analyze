@@ -20,7 +20,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends libpq5 curl \
+RUN apt-get update && apt-get install -y --no-install-recommends libpq5 curl gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed packages from builder
@@ -34,13 +34,16 @@ COPY . .
 # Non-root user for security
 RUN adduser --disabled-password --gecos "" appuser \
  && chown -R appuser /app
-USER appuser
+
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     LOG_LEVEL=INFO
 
 EXPOSE 8000
+
+ENTRYPOINT ["docker-entrypoint"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD curl -sf http://localhost:8000/health || exit 1

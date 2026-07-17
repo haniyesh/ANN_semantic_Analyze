@@ -53,6 +53,51 @@ def _load_cursors(cache_path: Path) -> dict:
     return cursors
 
 
+def _load_cursor_state(cache_path: Path, cursor_path: Path) -> dict[str, int]:
+    """Load cursors, preferring explicit durable state over cache inference.
+
+    The state file is intentionally authoritative: operators can rewind a
+    channel for gap recovery even when the display cache contains a newer,
+    sparse message that would otherwise make intermediate IDs look processed.
+    Cache-derived values are used only for channels absent from durable state.
+    """
+    cursors = _load_cursors(cache_path)
+    try:
+        stored = json.loads(cursor_path.read_text(encoding="utf-8"))
+        if isinstance(stored, dict):
+            for channel, msg_id in stored.items():
+                msg_id = int(msg_id)
+                cursors[channel] = msg_id
+    except (FileNotFoundError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+    return cursors
+
+
+def _save_cursor_state(cursor_path: Path, cursors: dict[str, int]) -> None:
+    """Atomically persist acknowledged processing progress."""
+    cursor_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cursor_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cursors, sort_keys=True, indent=2), encoding="utf-8")
+    tmp.replace(cursor_path)
+
+
+def acknowledge_message(channel: str, msg_id: int) -> None:
+    """Advance a channel only after its queued message finished processing."""
+    if not channel or not msg_id:
+        return
+    root = Path(__file__).resolve().parent.parent
+    cursor_path = root / "storage" / "telegram_cursors.json"
+    try:
+        cursors = json.loads(cursor_path.read_text(encoding="utf-8"))
+        if not isinstance(cursors, dict):
+            cursors = {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        cursors = {}
+    if int(msg_id) > int(cursors.get(channel, 0) or 0):
+        cursors[channel] = int(msg_id)
+        _save_cursor_state(cursor_path, cursors)
+
+
 def clean_url(url: str) -> str:
     if not url:
         return None
@@ -104,6 +149,18 @@ async def start(news_queue):
     ROOT         = Path(__file__).resolve().parent.parent
     session_name = str(ROOT / "telegram_session")
     cache_path   = ROOT / "storage" / "news_cache.json"
+    cursor_path  = ROOT / "storage" / "telegram_cursors.json"
+
+    # Do not download and queue channels that the production noise policy will
+    # reject later. This previously replayed hundreds of useless messages on
+    # every restart because rejected items never entered news_cache.json.
+    from pipeline.reduce_noise import BLOCKED_CHANNELS
+    active_channels = [ch for ch in TELEGRAM_CHANNELS if ch not in BLOCKED_CHANNELS]
+    blocked_channels = [ch for ch in TELEGRAM_CHANNELS if ch in BLOCKED_CHANNELS]
+    for ch in blocked_channels:
+        print(f"[TELEGRAM] {ch}: skipped (blocked by news filter)")
+
+    cursors = _load_cursor_state(cache_path, cursor_path)
 
     if not sys.stdin.isatty():
         raise RuntimeError(
@@ -113,24 +170,26 @@ async def start(news_queue):
         )
 
     client = TelegramClient(session_name, TELEGRAM_API_ID, TELEGRAM_API_HASH)
+    backfill_in_progress = True
+    live_buffer = []
 
     def _make_link(channel: str, msg_id: int) -> str:
         return f"https://t.me/{channel}/{msg_id}" if channel else ""
 
-    @client.on(events.NewMessage(chats=TELEGRAM_CHANNELS))
+    @client.on(events.NewMessage(chats=active_channels))
     async def handler(event):
         try:
             msg  = event.message
+            channel = ""
+            if event.chat:
+                channel = getattr(event.chat, "username", "") or \
+                          getattr(event.chat, "title",    "") or "telegram"
+
             text = (msg.text or "").strip()
             if not text:
                 return
 
             title = text.splitlines()[0][:300]
-
-            channel = ""
-            if event.chat:
-                channel = getattr(event.chat, "username", "") or \
-                          getattr(event.chat, "title",    "") or "telegram"
 
             link = _make_link(channel, msg.id)
             pub_dt = msg.date
@@ -138,31 +197,34 @@ async def start(news_queue):
             if not _mark_seen(link):
                 return  # already queued/processed this message
 
-            news_queue.append({
+            payload = {
                 "title":   title,
                 "text":    text,
                 "source":  channel,
                 "link":    link,
                 "pub_dt":  pub_dt,
-            })
+                "telegram_channel": channel,
+                "telegram_msg_id": msg.id,
+            }
+            (live_buffer if backfill_in_progress else news_queue).append(payload)
             print(f"[TELEGRAM] {channel} | {title[:70]}")
 
         except Exception as e:
             print(f"[TELEGRAM] Handler error: {e}")
 
-    print(f"[TELEGRAM] Connecting -- monitoring {len(TELEGRAM_CHANNELS)} channels...")
+    print(f"[TELEGRAM] Connecting -- monitoring {len(active_channels)} channels...")
     await client.start()
 
     # ── Cursor-based backfill ─────────────────────────────────────
     # For each channel, resume from the last Telegram message ID stored in
     # cache (zero duplicates, no fixed time window). Channels with no stored
     # history fall back to _FALLBACK_DAYS.
-    cursors = _load_cursors(cache_path)
     fallback_cutoff = datetime.now(timezone.utc) - timedelta(days=_FALLBACK_DAYS)
 
     total_backfill = 0
     skipped = 0
-    for ch in TELEGRAM_CHANNELS:
+    pending_backfill = []
+    for ch in active_channels:
         last_id = cursors.get(ch, 0)
         count = 0
         try:
@@ -180,12 +242,14 @@ async def start(news_queue):
                         continue
                     msg_dt = msg.date if msg.date.tzinfo else msg.date.replace(tzinfo=timezone.utc)
                     title = text.splitlines()[0][:300]
-                    news_queue.append({
+                    pending_backfill.append({
                         "title":  title,
                         "text":   text,
                         "source": ch,
                         "link":   link,
                         "pub_dt": msg_dt,
+                        "telegram_channel": ch,
+                        "telegram_msg_id": msg.id,
                     })
                     count += 1
             else:
@@ -204,12 +268,14 @@ async def start(news_queue):
                         skipped += 1
                         continue
                     title = text.splitlines()[0][:300]
-                    news_queue.append({
+                    pending_backfill.append({
                         "title":  title,
                         "text":   text,
                         "source": ch,
                         "link":   link,
                         "pub_dt": msg_dt,
+                        "telegram_channel": ch,
+                        "telegram_msg_id": msg.id,
                     })
                     count += 1
         except Exception as e:
@@ -217,6 +283,15 @@ async def start(news_queue):
         print(f"[TELEGRAM]   {ch}: {count} new messages queued")
         total_backfill += count
 
+    # Telethon returns newest first by default. Process oldest first so every
+    # acknowledged cursor represents a contiguous completed prefix. Live
+    # messages received during the scan are buffered behind that backlog.
+    pending_backfill.sort(key=lambda item: item["pub_dt"])
+    live_buffer.sort(key=lambda item: item["pub_dt"])
+    news_queue.extend(pending_backfill)
+    news_queue.extend(live_buffer)
+    backfill_in_progress = False
+
     print(f"[TELEGRAM] Backfill complete — {total_backfill} queued, {skipped} in-process duplicates skipped")
-    print(f"[TELEGRAM] Listening: {TELEGRAM_CHANNELS}")
+    print(f"[TELEGRAM] Listening: {active_channels}")
     await client.run_until_disconnected()

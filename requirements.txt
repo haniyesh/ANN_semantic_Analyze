@@ -13,7 +13,9 @@ huggingface-hub==0.23.0
 # Production artifact xgb_impact_clf_15m_bert_rag.json was written by 3.2.0.
 # Loading it with XGBoost 2.x is not a supported deployment contract.
 xgboost==3.2.0
-scikit-learn==1.4.2
+# The deployed scaler was serialized with 1.9.0; pickle compatibility requires
+# the runtime to use the same release.
+scikit-learn==1.9.0
 numpy==1.26.4
 pandas==2.2.2
 fastembed==0.3.6

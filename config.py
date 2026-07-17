@@ -28,22 +28,14 @@ GROQ_CLASSIFICATION_MODEL = os.getenv("GROQ_CLASSIFICATION_MODEL", "llama-3.1-8b
 HF_API_KEY          = os.getenv("HF_API_KEY")
 
 # ── News scoring thresholds — importance-tiered, calibrated to model output ───
-# Recalibrated 2026-07 against storage/news_cache.json (3,501 items). The gate is
-# on the production 15-minute score AND a confidence floor. One-hour fields are
-# retained only for historical research compatibility.
+# Applied to the production 15-minute score. One-hour fields remain only for
+# historical research compatibility. Sentiment confidence describes direction
+# reliability and does not redefine the model's impact probability.
 #
-# Why the old values were wrong: `confidence` is the max of a 3-class softmax, so
-# its natural floor is ~0.33 and ~95% of items already exceed 0.50 — the old 0.50
-# confidence gate filtered almost nothing. And a 0.50 score gate tagged ~19% of
-# all news "Hot" (the alert tier), vs the ~0.4% originally intended. The values
-# below come from the measured score/confidence percentiles so each tier maps to
-# the share of news its importance warrants.
-#
-# Tier    | 15m score           | Confidence | ~% of cache | Action
-# Hot     | ≥ 0.80             | ≥ 0.78     | ~1–2%       | Telegram alert (high conviction)
-# Medium  | ≥ 0.55             | ≥ 0.70     | ~12–15%     | Highlighted badge
-# Show    | ≥ 0.30             | ≥ 0.50     | ~20–25%     | Shown in dashboard feed
-# Hidden  | below Show gate                              | rest        | not displayed
+# User-facing impact contract:
+# Critical ≥ 0.80; High/Important ≥ 0.60; Medium ≥ 0.43; Low < 0.43.
+# Impact is independent of sentiment confidence. Confidence only determines
+# whether bullish/bearish direction is reliable enough for a non-critical alert.
 DASHBOARD_API        = os.getenv("DASHBOARD_API", "http://localhost:8000")
 SCORE_15M_MIN        = 0.0
 SCORE_15M_MAX        = 1.0
@@ -51,15 +43,16 @@ SCORE_1H_MIN         = 0.0
 SCORE_1H_MAX         = 1.0
 
 # Impact badge / gate thresholds — applied to the production 15-minute score.
-SCORE_THRESHOLD_HOT    = 0.80   # Hot badge / alert
-SCORE_THRESHOLD_MEDIUM = 0.55   # Medium badge
-SCORE_THRESHOLD_SHOW   = 0.30   # minimum score to display in feed
-SCORE_THRESHOLD_HIGH   = SCORE_THRESHOLD_HOT   # alias for legacy code
+SCORE_THRESHOLD_HOT    = 0.80   # user-facing Critical
+SCORE_THRESHOLD_MEDIUM = 0.60   # user-facing High / Important
+SCORE_THRESHOLD_SHOW   = 0.43   # user-facing Medium / chart minimum
+SCORE_THRESHOLD_HIGH   = SCORE_THRESHOLD_MEDIUM
 
 # Confidence floors — one per tier, scaled by news importance
-CONF_SHOW   = 0.50   # display floor (matches server CONF_MIN=50 and dashboard CONF_MIN=50)
-CONF_MEDIUM = 0.70   # medium tier confidence (Telegram bot only)
-CONF_HOT    = 0.78   # hot tier / alert (Telegram bot only)
+CONF_SHOW   = 0.00   # confidence never hides otherwise valid news
+CONF_MEDIUM = 0.60   # moderate sentiment confidence
+CONF_HOT    = 0.60   # high-impact alert direction floor
+CONF_HIGH   = 0.70   # high sentiment reliability label
 CONF_MIN    = CONF_SHOW   # legacy alias = display floor
 
 # "Show" tier — minimum to display in dashboard feed (score AND confidence gate)
@@ -68,7 +61,7 @@ IMPORTANT_MIN_CONFIDENCE = CONF_SHOW
 IMPORTANT_MIN_SCORE_1H   = SCORE_THRESHOLD_SHOW
 
 # "Hot" tier — triggers Telegram alert (uses max of both scores)
-HOT_MIN_MODEL_SCORE      = SCORE_THRESHOLD_HOT
+HOT_MIN_MODEL_SCORE      = SCORE_THRESHOLD_HIGH
 HOT_MIN_CONFIDENCE       = CONF_HOT
 HOT_MIN_MODEL_SCORE_1H   = SCORE_THRESHOLD_HOT   # 1h also checked via max()
 HOT_MIN_SCORE_1H         = SCORE_THRESHOLD_HOT
@@ -81,7 +74,8 @@ def impact_tier(score_15m, score_1h=None) -> str:
 
     ``score_1h`` remains accepted for compatibility with historical callers but
     intentionally does not affect live routing.
-    Returns one of: 'Hot' | 'Medium' | 'Show' | 'Low'."""
+    Internal compatibility labels map to user labels as follows:
+    Hot=Critical, Medium=High, Show=Medium, Low=Low."""
     s = abs(float(score_15m or 0))
     if s >= SCORE_THRESHOLD_HOT:
         return "Hot"

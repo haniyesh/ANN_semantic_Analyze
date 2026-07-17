@@ -11,10 +11,10 @@ Flow:
        crypto-specific types             → CryptoBERT
      CryptoBERT embedding is shared — no duplicate forward pass.
   3. Run through the 15-minute XGBoost BERT + RAG model (1578 features)
-  4. Route — importance-tiered gate on score AND confidence (see config.py):
-     - Display gate (Show): score_15m >= 0.30 AND confidence >= 0.50
-     - Medium badge:        score_15m >= 0.55 AND confidence >= 0.70
-     - Hot badge / alert:   score_15m >= 0.80 AND confidence >= 0.78
+  4. Route using the canonical impact contract (see config.py):
+     - Medium:  score_15m >= 0.43
+     - High:    score_15m >= 0.60 (alert when sentiment confidence >= 60%)
+     - Critical: score_15m >= 0.80 (always alert while fresh)
 """
 
 import asyncio
@@ -30,6 +30,12 @@ warnings.filterwarnings("ignore", message=".*downstream task.*")
 
 import numpy as np
 import httpx
+# Initialize XGBoost's native/OpenMP runtime before PyTorch.  If PyTorch loads
+# first, constructing the first Booster can abort the process with glibc's
+# "double free detected in tcache" on Linux.  Keep the guard alive so the
+# runtime is not torn down while application classifiers are in use.
+import xgboost as xgb
+_xgb_runtime_guard = xgb.Booster()
 import torch
 from pathlib import Path
 from collections import deque
@@ -203,7 +209,6 @@ def _load_model():
         _log.warning("Impact classifier not found — scoring disabled")
         return {}
 
-    import xgboost as xgb
     clf_15m = xgb.XGBClassifier(); clf_15m.load_model(str(clf15_path))
 
     if scaler_path.exists():
@@ -213,10 +218,15 @@ def _load_model():
         _log.warning("Feature scaler not found — run training/xgboost_train_bert.py first")
         return {}
 
-    # Load FinBERT for live embeddings — always CPU to avoid CUDA capability mismatch
-    from transformers import AutoTokenizer, AutoModel
-    fb_tok = AutoTokenizer.from_pretrained(FINBERT_MODEL, revision=FINBERT_REVISION)
-    fb_mdl = AutoModel.from_pretrained(FINBERT_MODEL, revision=FINBERT_REVISION).eval().to("cpu")
+    # Reuse the FinBERT classifier already loaded by the sentiment pipeline.
+    # Loading a second copy here wastes memory and can crash native PyTorch/CUDA
+    # teardown with "double free detected" on some Linux environments.  The
+    # classifier's base encoder produces the same 768-dimensional hidden state
+    # required by the XGBoost feature contract.
+    sentiment_models = _load_sentiment_models()
+    fb_pipe = sentiment_models["fb"]
+    fb_tok = fb_pipe.tokenizer
+    fb_mdl = fb_pipe.model.base_model.eval().to("cpu")
 
     thr15 = 0.51
     res_path = ROOT_DIR / "xgb_bert_rag_results.json"
@@ -436,12 +446,11 @@ def query_rag(title: str, published_ts: int, channel: str) -> tuple[np.ndarray, 
 # HOT SIGNAL CHECK
 # ══════════════════════════════════════════════════════════════════
 def is_hot(model_score: float, confidence: float, age_minutes: float) -> bool:
-    """Hot tier: score_15m >= HOT_MIN_MODEL_SCORE AND
-    confidence >= HOT_MIN_CONFIDENCE AND age < HOT_MAX_AGE_MIN."""
-    return (
-        abs(model_score) >= HOT_MIN_MODEL_SCORE and
-        confidence       >= HOT_MIN_CONFIDENCE   and
-        age_minutes      <  HOT_MAX_AGE_MIN
+    """Alert on Critical impact, or High impact with reliable direction."""
+    score = abs(model_score)
+    return age_minutes < HOT_MAX_AGE_MIN and (
+        score >= SCORE_THRESHOLD_HOT
+        or (score >= HOT_MIN_MODEL_SCORE and confidence >= HOT_MIN_CONFIDENCE)
     )
 
 
@@ -1085,13 +1094,16 @@ async def processor_loop(pool):
                 pub_dt = news.get("pub_dt", datetime.now(timezone.utc))
                 coin   = extract_coin_from_text(news.get("text", ""))
 
-                # Skip items already persisted in DB (survives restarts within backfill window)
-                if pool is not None and await is_processed(pool, link):
-                    continue
+                # PostgreSQL and the dashboard JSON have different recovery
+                # lifecycles. An operator may intentionally rebuild/rewind the
+                # JSON while the DB still remembers a link. In that case it
+                # must be rescored and delivered again, but not inserted into
+                # PostgreSQL a second time.
+                already_processed = pool is not None and await is_processed(pool, link)
 
                 payload = await process_news_item(news)
 
-                if pool is not None:
+                if pool is not None and not already_processed:
                     await mark_processed(pool, link)
                     db_id = await save_full_news(
                         pool=pool,
@@ -1110,6 +1122,14 @@ async def processor_loop(pool):
                             symbol=(coin or "BTC")[:10],
                             news_time=pub_dt,
                         )
+
+                # Commit Telegram progress only after all processing and
+                # persistence work above succeeded. If the process stops before
+                # this point, the message is fetched again on the next start.
+                telegram_msg_id = news.get("telegram_msg_id")
+                if telegram_msg_id:
+                    from bot.telegram_listener import acknowledge_message
+                    acknowledge_message(news.get("telegram_channel", ""), telegram_msg_id)
 
             except Exception as e:
                 _log.error("Error processing article: %s", e)
@@ -1161,7 +1181,6 @@ async def main():
     _rag_pending_lock = None
     _dashboard_outbox_lock = None
     shutdown_event = asyncio.Event()
-    _acquire_single_instance_lock()
 
     def _request_shutdown() -> None:
         global _shutdown
@@ -1238,9 +1257,21 @@ if __name__ == "__main__":
     from config import validate_bot
     validate_bot()
 
+    # Fail fast before loading several gigabytes of model state. Lock
+    # contention is not a crash and cannot be repaired by the retry loop: it
+    # means the requested bot is already running normally.
+    try:
+        _acquire_single_instance_lock()
+    except RuntimeError as exc:
+        _log.error("%s", exc)
+        raise SystemExit(2) from None
+
     _log.info("Loading models (XGBoost v9 + DualBERT)…")
-    _load_sentiment_models()
+    # XGBoost must construct its native classifier before PyTorch initializes
+    # the transformer models. Reversing this order can trigger a libgomp/native
+    # allocator double-free inside XGBoost on Linux.
     _load_model()
+    _load_sentiment_models()  # cached by _load_model; documents readiness
     _log.info("Models ready")
 
     _backoff = 3          # seconds; doubles on repeated non-network crashes

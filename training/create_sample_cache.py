@@ -20,6 +20,10 @@ import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+# Initialize XGBoost's native runtime before NumPy/Pandas/PyTorch load their
+# OpenMP libraries. Keep the guard alive for the entire rebuild process.
+import xgboost as xgb
+_xgb_runtime_guard = xgb.Booster()
 import numpy as np
 import pandas as pd
 
@@ -212,7 +216,12 @@ def main():
     parser.add_argument("--max",      type=int,   default=None,  help="Max items to score")
     parser.add_argument("--append",   action="store_true",       help="Add to existing cache")
     parser.add_argument("--skip-rag", action="store_true",       help="Skip Qdrant RAG query")
+    parser.add_argument("--start-date", type=str, default=None,    help="Inclusive UTC date (YYYY-MM-DD)")
+    parser.add_argument("--end-date",   type=str, default=None,    help="Inclusive UTC date (YYYY-MM-DD)")
     args = parser.parse_args()
+
+    if bool(args.start_date) != bool(args.end_date):
+        parser.error("--start-date and --end-date must be provided together")
 
     print("=" * 60)
     print(f"  CREATE SAMPLE CACHE  —  last {args.months} months  —  XGBoost v9")
@@ -224,8 +233,19 @@ def main():
     full_df["published"] = pd.to_datetime(full_df["published"], format="mixed", utc=True, errors="coerce")
     full_df = full_df.dropna(subset=["title", "published"])
 
-    cutoff = pd.Timestamp.now(tz="UTC") - pd.DateOffset(months=args.months)
-    df = full_df[full_df["published"] >= cutoff].copy()
+    if args.start_date:
+        range_start = pd.Timestamp(args.start_date, tz="UTC")
+        range_end = pd.Timestamp(args.end_date, tz="UTC") + pd.Timedelta(days=1)
+        if range_end <= range_start:
+            parser.error("--end-date must be on or after --start-date")
+        df = full_df[
+            (full_df["published"] >= range_start)
+            & (full_df["published"] < range_end)
+        ].copy()
+        cutoff = range_start
+    else:
+        cutoff = pd.Timestamp.now(tz="UTC") - pd.DateOffset(months=args.months)
+        df = full_df[full_df["published"] >= cutoff].copy()
 
     # For channels with no data in the window, include their most recent 200 items
     # Only if their latest item is within 6 months (skip truly dead channels)
@@ -233,7 +253,8 @@ def main():
     FALLBACK_MAX_AGE     = pd.Timestamp.now(tz="UTC") - pd.DateOffset(months=6)
     all_channels = full_df["channel"].unique()
     covered = set(df["channel"].unique())
-    missing_channels = [ch for ch in all_channels if ch not in covered]
+    # Exact date ranges must not pull fallback rows from outside the range.
+    missing_channels = [] if args.start_date else [ch for ch in all_channels if ch not in covered]
     fallback_frames = []
     for ch in missing_channels:
         ch_df = full_df[full_df["channel"] == ch].sort_values("published", ascending=False).head(FALLBACK_PER_CHANNEL)
@@ -264,8 +285,10 @@ def main():
         print(f"    {ch:<30}: {cnt:,}")
 
     print(f"\n[2/5] Loading models...")
-    bert = _load_bert_models()
+    # Initialize XGBoost/OpenMP before PyTorch to avoid a native double-free on
+    # Linux when the first Booster is constructed after transformer inference.
     clf15, clf1h, scaler, thr15, thr1h = _load_xgb()
+    bert = _load_bert_models()
     print(f"  XGBoost thresholds: 15m={thr15:.3f}  1h={thr1h:.3f}")
 
     print(f"\n[3/5] Scoring {len(df):,} items...")
@@ -353,10 +376,9 @@ def main():
         all_items = results
         print(f"  Fresh cache: {len(all_items)} items")
 
-    CACHE_PATH.write_text(
-        json.dumps({"news": all_items}, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    tmp_path = CACHE_PATH.with_suffix(".rebuild.tmp")
+    tmp_path.write_text(json.dumps(all_items, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp_path.replace(CACHE_PATH)
 
     # Summary
     print(f"\n[5/5] Impact distribution:")

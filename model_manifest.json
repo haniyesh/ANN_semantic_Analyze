@@ -7,7 +7,8 @@
   },
   "scaler": {
     "path": "xgb_feature_scaler_bert_rag.pkl",
-    "sha256": "91fa12720b38999e891e8ed401cb5ec535dfe14e2d3d628ec36d78100bb7a494"
+    "sha256": "91fa12720b38999e891e8ed401cb5ec535dfe14e2d3d628ec36d78100bb7a494",
+    "scikit_learn_version": "1.9.0"
   },
   "feature_contract": {
     "path": "pipeline/feature_contract.py",

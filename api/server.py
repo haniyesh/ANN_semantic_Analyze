@@ -73,7 +73,8 @@ class ExplainRequest(BaseModel):
 
 from config import (
     API_HOST, API_PORT, GROQ_API_KEYS, GROQ_CLASSIFICATION_MODEL, validate_api,
-    SCORE_THRESHOLD_HOT, SCORE_THRESHOLD_MEDIUM, SCORE_THRESHOLD_SHOW, CONF_SHOW,
+    SCORE_THRESHOLD_HOT, SCORE_THRESHOLD_MEDIUM, SCORE_THRESHOLD_SHOW,
+    CONF_SHOW, CONF_MEDIUM, CONF_HIGH,
     impact_tier as _config_impact_tier,
 )
 from log import setup_logging, get_logger
@@ -136,7 +137,9 @@ def _check_rate_limit(client_ip: str, rpm: int = RATE_LIMIT_RPM):
 
 CACHE_FILE   = ROOT / "storage" / "news_cache.json"
 HIST_CSV     = ROOT / "news_cleaned_filtered_scored.csv"
-HISTORY_WINDOW_MONTHS = 3          # only serve news from the last N months
+# Keep enough live-cache history for an offline three-month snapshot plus the
+# subsequent catch-up period. Signal/chart endpoints still apply strict gates.
+HISTORY_WINDOW_MONTHS = 6
 
 # Canonical channel name map — None means "blocked, drop the item".
 # Single source of truth; applied via _normalize_channel() below.
@@ -163,9 +166,9 @@ def _passes_noise_filter(item: dict) -> bool:
 
 # Impact / gate thresholds — imported from config.py (single source of truth).
 # Applied to the production 15-minute model_score. Confidence is 0–100 here.
-SCORE_HOT  = SCORE_THRESHOLD_HOT       # 0.80
-SCORE_MED  = SCORE_THRESHOLD_MEDIUM    # 0.55
-SCORE_SHOW = SCORE_THRESHOLD_SHOW      # 0.30
+SCORE_HOT  = SCORE_THRESHOLD_HOT       # Critical: 0.80
+SCORE_MED  = SCORE_THRESHOLD_MEDIUM    # High / Important: 0.60
+SCORE_SHOW = SCORE_THRESHOLD_SHOW      # Medium: 0.43
 SCORE_HIGH = SCORE_HOT                 # alias used in hot_news / explain endpoint
 CONF_MIN   = CONF_SHOW * 100           # config is 0–1; server compares against 0–100 confidence
 
@@ -189,6 +192,11 @@ def _passes_display(item: dict) -> bool:
 def _gate_feed(items: list) -> list:
     """Apply the display gate and refresh the impact badge for a list of news items."""
     return [{**i, "impact": _recompute_impact(i)} for i in items if _passes_display(i)]
+
+
+def _prepare_all_news(items: list) -> list:
+    """Prepare the general news feed without applying signal thresholds."""
+    return [{**i, "impact": _recompute_impact(i)} for i in items]
 
 # ── News Importance — imported from config ──
 try:
@@ -227,7 +235,14 @@ def _load_cache() -> List[dict]:
                             ).timestamp())
                         except Exception:
                             pass
-            cutoff = int(time.time()) - HISTORY_WINDOW_MONTHS * 30 * 24 * 3600
+            # Anchor offline snapshots to their newest cached article rather
+            # than the host clock. Otherwise a deliberately historical cache
+            # silently loses its oldest rows when opened at a later date.
+            latest_cached_ts = max(
+                (int(i.get("published_ts") or 0) for i in items),
+                default=int(time.time()),
+            )
+            cutoff = latest_cached_ts - HISTORY_WINDOW_MONTHS * 30 * 24 * 3600
             items = [i for i in items if (i.get("published_ts") or 0) >= cutoff]
             return items
         except Exception as _e:
@@ -711,7 +726,7 @@ async def ingest_news(item: IngestNewsItem, x_api_key: str = Header(default=""))
 @app.get("/news/since")
 def get_since(ts: int = 0):
     """Return items with published_ts > ts — for incremental frontend polling."""
-    items = _gate_feed([
+    items = _prepare_all_news([
         i for i in _get_combined()
         if float(i.get("published_ts") or i.get("received_at", 0)) > ts
     ])
@@ -754,8 +769,10 @@ def get_config():
         "score_medium":       SCORE_MED,
         "score_show":         SCORE_SHOW,
         "conf_min":           CONF_MIN,
+        "conf_moderate":      CONF_MEDIUM * 100,
+        "conf_high":          CONF_HIGH * 100,
         "reliable_channels":  ["the_block_crypto", "coindesk", "cointelegraph", "WatcherGuru", "google_news"],
-        "impact_labels":      ["Hot", "Medium", "Show", "Low"],
+        "impact_labels":      ["Critical", "High", "Medium", "Low"],
     }
 
 
@@ -892,7 +909,7 @@ def get_all(response: Response, limit: int = 500, offset: int = 0):
     Use ?limit=N&offset=M for cursor-style pagination. Clients should
     request only what they render — avoid limit > 2000.
     """
-    combined = _gate_feed(sorted(
+    combined = _prepare_all_news(sorted(
         _get_combined(),
         key=lambda x: x.get("published_ts") or x.get("received_at") or 0,
         reverse=True,
@@ -923,7 +940,7 @@ def get_dates():
 
 @app.get("/news/by-date")
 def get_by_date(start: int, end: int):
-    return _gate_feed([
+    return _prepare_all_news([
         item for item in all_news + historical_dates_index  # dates index kept separate
         if start <= float(item.get("published_ts") or item.get("received_at", 0)) <= end
     ])

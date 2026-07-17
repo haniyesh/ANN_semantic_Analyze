@@ -84,9 +84,9 @@ function sentimentLabel(s) {
 // All filter/badge functions read from _cfg; no threshold values live in this file.
 const _cfg = {
   scoreHot:         0.80,
-  scoreMed:         0.55,
-  scoreShow:        0.30,
-  confMin:          50,
+  scoreMed:         0.60,
+  scoreShow:        0.43,
+  confMin:          0,
   reliableChannels: new Set(["the_block_crypto", "coindesk", "cointelegraph", "WatcherGuru", "google_news"]),
 };
 
@@ -97,6 +97,14 @@ function scoreTier(score15, conf) {
   if (s >= _cfg.scoreHot) return "Hot";
   if (s >= _cfg.scoreMed) return "Medium";
   return "Show";
+}
+
+// Internal compatibility tiers map to the user-facing impact vocabulary.
+function impactDisplayLabel(tier) {
+  if (tier === "Hot") return "Critical";
+  if (tier === "Medium") return "High";
+  if (tier === "Show") return "Medium";
+  return "Low";
 }
 
 // ── News Importance (editorial importance — independent of price impact) ──
@@ -150,12 +158,12 @@ function cleanTitle(title = "") {
     .replace(/`([^`]*)`/g, "$1")     // strip inline code
     .trim();
 }
-// Display filter: confidence + reliable channel only (NO score gate — score is for badges, not filtering)
+// General news feed: confidence + reliable source only. Neutral news is still
+// news and must remain visible; model score is used only by signal/chart views.
 function passesFilter(n) {
   const conf = n.confidence || 0;
   return _cfg.reliableChannels.has(n.channel)
     && conf >= _cfg.confMin
-    && n.sentiment !== "neutral"
     && (n.title || "").trim().length >= 20;
 }
 function passesChartFilter(n) {
@@ -749,7 +757,7 @@ function ExplainPanel({ selectedNews: item, onClose }) {
   const score      = item ? Math.abs(item.model_score || 0) : 0;
   const _tier      = item ? scoreTier(score, item.confidence) : "Hidden";
   const impactClr  = _tier === "Hot" ? COLORS.red : _tier === "Medium" ? "#f97316" : COLORS.muted;
-  const impactLbl  = _tier === "Hot" ? "Hot" : _tier === "Medium" ? "Medium" : _tier === "Show" ? "Show" : "Low";
+  const impactLbl  = impactDisplayLabel(_tier);
   const sentClr    = { positive: COLORS.green, negative: COLORS.red, neutral: COLORS.muted };
   const sColor     = item ? (sentClr[item.sentiment] || COLORS.muted) : COLORS.muted;
 
@@ -932,7 +940,7 @@ function NewsModal({ item, onClose }) {
   const score   = Math.abs(item.model_score || 0);
   const _t = scoreTier(score, item.confidence);
   const impactColor = _t === "Hot" ? COLORS.red : _t === "Medium" ? "#f97316" : COLORS.muted;
-  const impactLabel = _t === "Hot" ? "Hot" : _t === "Medium" ? "Medium" : _t === "Show" ? "Show" : "Low";
+  const impactLabel = impactDisplayLabel(_t);
 
   // Auto-fetch similar news on open if item has none
   useEffect(() => {
@@ -1200,7 +1208,7 @@ function NewsCard({ item, onClick }) {
                 >
                   {dots}
                 </span>
-                <span style={{ color: clr, fontWeight: 600 }}>{tier}</span>
+                <span style={{ color: clr, fontWeight: 600 }}>{impactDisplayLabel(tier)}</span>
                 {bulletHover && (
                   <div style={{
                     position: "absolute", bottom: "calc(100% + 6px)", left: 0,
@@ -1210,7 +1218,7 @@ function NewsCard({ item, onClick }) {
                     boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
                   }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: clr, marginBottom: 4 }}>
-                      {dots} {tier} Impact
+                      {dots} {impactDisplayLabel(tier)} Impact
                     </div>
                     <div style={{ fontSize: 10, color: COLORS.text, lineHeight: 1.5, marginBottom: 6 }}>
                       {cleanTitle(item.title)}
@@ -1693,9 +1701,7 @@ function CustomAnalyzer() {
               const impClr = result.impact === "Hot" ? COLORS.red : result.impact === "Medium" ? "#f97316" : COLORS.muted;
               const sentColor = result.sentiment === "positive" ? COLORS.green : result.sentiment === "negative" ? COLORS.red : COLORS.muted;
               const sentLabel = result.sentiment === "positive" ? "▲ BULLISH" : result.sentiment === "negative" ? "▼ BEARISH" : "● NEUTRAL";
-              const impactLabel = result.impact === "Show"
-                ? (result.news_type?.replace(/_/g, " ") || "Show")
-                : result.impact;
+              const impactLabel = impactDisplayLabel(result.impact);
               return (
                 <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 20, flexWrap: "wrap" }}>
                   <div style={{ padding: "10px 24px", borderRadius: 12, border: `2px solid ${impClr}`, background: `${impClr}18`, textAlign: "center" }}>
