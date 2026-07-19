@@ -26,6 +26,7 @@ export interface NewsItem {
   prob_positive?: number;
   prob_negative?: number;
   prob_neutral?: number;
+  type?: "BUY" | "SELL" | "NEUTRAL";
   news_type?: string;
   btc_change_15m?: number;
   similar?: SimilarNews[];

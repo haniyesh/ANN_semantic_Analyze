@@ -179,6 +179,13 @@ function signalAction(type, modelScore) {
   if (type === "SELL") return s >= _cfg.scoreHot ? "Strong Sell" : "Sell";
   return "Neutral";
 }
+
+function modelDirectionLabel(item) {
+  if (item?.type === "BUY") return "Bullish";
+  if (item?.type === "SELL") return "Bearish";
+  return "Neutral";
+}
+
 // Normalize raw model score → 0–1 for items not yet normalized by main.py
 function clientNormalize(item) {
   if (item.score_normalized) return item; // already normalized by main.py / score_historical
@@ -860,22 +867,6 @@ function ExplainPanel({ selectedNews: item, onClose }) {
               </div>
             </div>
 
-            {/* Stats rows — all ML fields */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 10 }}>
-              {[
-                ["Score",   fmtScore(item.model_score), COLORS.gold],
-                ["Conf",    `${Math.round(item.confidence || 0)}%`, COLORS.accent],
-                ["BTC 15m", fmtPct(item.btc_change_15m),
-                  (item.btc_change_15m || 0) > 0 ? COLORS.green : (item.btc_change_15m || 0) < 0 ? COLORS.red : COLORS.muted],
-                ["Weight",  item.weight != null ? Number(item.weight).toFixed(1) : "—", COLORS.muted],
-              ].map(([lbl, val, clr]) => (
-                <div key={lbl} style={{ background: COLORS.bg, borderRadius: 7, padding: "6px 8px" }}>
-                  <div style={{ fontSize: 8, color: COLORS.muted, letterSpacing: 0.8, marginBottom: 2 }}>{lbl.toUpperCase()}</div>
-                  <div style={{ fontSize: 11, color: clr, fontFamily: "monospace", fontWeight: 700 }}>{val}</div>
-                </div>
-              ))}
-            </div>
-
             {/* News type badge */}
             {item.news_type && (
               <div style={{ marginBottom: 10 }}>
@@ -883,11 +874,6 @@ function ExplainPanel({ selectedNews: item, onClose }) {
                   {NEWS_TYPE_LABELS[item.news_type] || item.news_type}
                 </span>
               </div>
-            )}
-
-            {/* Probability bars */}
-            {(item.prob_positive != null || item.prob_negative != null) && (
-              <ProbBars pos={item.prob_positive} neg={item.prob_negative} neu={item.prob_neutral} />
             )}
 
             {/* Macro context */}
@@ -909,29 +895,6 @@ function ExplainPanel({ selectedNews: item, onClose }) {
             {explainErr && !loading && (
               <div style={{ fontSize: 11, color: COLORS.red, padding: "8px 12px", background: `${COLORS.red}11`, borderRadius: 8, marginBottom: 14 }}>
                 ⚠ {explainErr}
-              </div>
-            )}
-
-            {/* CoT steps */}
-            {explain && !loading && (
-              <div style={{
-                background: COLORS.bg, borderRadius: 10, padding: "12px 14px",
-                border: `1px solid ${COLORS.purple}33`, marginBottom: 14,
-              }}>
-                <div style={{ fontSize: 10, color: COLORS.purple, fontWeight: 700, letterSpacing: 0.5, marginBottom: 10 }}>
-                  WHY THIS SCORE?
-                </div>
-                {explain.steps && explain.steps.length > 0
-                  ? explain.steps.map((step, i) => (
-                    <div key={i} style={{
-                      fontSize: 11, color: COLORS.text, lineHeight: 1.65, padding: "5px 0",
-                      borderBottom: i < (explain.steps?.length ?? 0) - 1 ? `1px solid ${COLORS.border}` : "none",
-                    }}>
-                      {step}
-                    </div>
-                  ))
-                  : <div style={{ fontSize: 11, color: COLORS.text, lineHeight: 1.7, whiteSpace: "pre-wrap" }}>{explain.explanation}</div>
-                }
               </div>
             )}
 
@@ -1046,24 +1009,6 @@ function NewsModal({ item, onClose }) {
             : cleanTitle(item.title)}
         </div>
 
-        {/* Full stats grid — all ML fields */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, marginBottom: 14 }}>
-          {[
-            ["Channel",    item.channel || "—",                           COLORS.text],
-            ["Impact",     impactLabel,                                    impactColor],
-            ["Confidence", `${Math.round(item.confidence || 0)}%`,        COLORS.accent],
-            ["Score",      fmtScore(item.model_score),                    COLORS.gold],
-            ["BTC 15m",    fmtPct(item.btc_change_15m),
-              (item.btc_change_15m||0)>0 ? COLORS.green : (item.btc_change_15m||0)<0 ? COLORS.red : COLORS.muted],
-            ["Weight",     item.weight != null ? Number(item.weight).toFixed(1) : "—", COLORS.muted],
-          ].map(([lbl, val, clr]) => (
-            <div key={lbl} style={{ background: COLORS.bg, borderRadius: 8, padding: "8px 10px" }}>
-              <div style={{ fontSize: 9, color: COLORS.muted, letterSpacing: 1, marginBottom: 4 }}>{lbl.toUpperCase()}</div>
-              <div style={{ fontSize: 12, color: clr, fontFamily: "monospace", fontWeight: 600 }}>{val}</div>
-            </div>
-          ))}
-        </div>
-
         {/* News type + source row */}
         <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
           {item.news_type && (
@@ -1080,13 +1025,6 @@ function NewsModal({ item, onClose }) {
 
         {/* Macro context */}
         <MacroContext ts={item.published_ts} />
-
-        {/* Probability bars */}
-        {(item.prob_positive != null || item.prob_negative != null) && (
-          <div style={{ marginBottom: 20 }}>
-            <ProbBars pos={item.prob_positive} neg={item.prob_negative} neu={item.prob_neutral} />
-          </div>
-        )}
 
         {/* ── AI Explanation panel ─────────────────────────────────── */}
         <div style={{ marginBottom: 20 }}>
@@ -1246,6 +1184,7 @@ function NewsCard({ item, onClick }) {
             const tier = scoreTier(s, item.confidence, item.sentiment);
             const clr  = tier === "Hot" ? COLORS.red : tier === "Moderate" ? "#f97316" : COLORS.muted;
             const dots = tier === "Hot" ? "●●●" : tier === "Moderate" ? "●●" : "●";
+            const direction = ` ${modelDirectionLabel(item)}`;
             return (
               <span style={{ fontSize: 10, color: COLORS.muted, display: "flex", alignItems: "center", gap: 4, position: "relative" }}>
                 <span
@@ -1255,7 +1194,7 @@ function NewsCard({ item, onClick }) {
                 >
                   {dots}
                 </span>
-                <span style={{ color: clr, fontWeight: 600 }}>Impact: {impactDisplayLabel(tier)}</span>
+                <span style={{ color: clr, fontWeight: 600 }}>Impact: {impactDisplayLabel(tier)}{direction}</span>
                 {bulletHover && (
                   <div style={{
                     position: "absolute", bottom: "calc(100% + 6px)", left: 0,
@@ -1265,7 +1204,7 @@ function NewsCard({ item, onClick }) {
                     boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
                   }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: clr, marginBottom: 4 }}>
-                      {dots} Impact: {impactDisplayLabel(tier)}
+                      {dots} Impact: {impactDisplayLabel(tier)}{direction}
                     </div>
                     <div style={{ fontSize: 10, color: COLORS.text, lineHeight: 1.5, marginBottom: 6 }}>
                       {cleanTitle(item.title)}
@@ -1275,18 +1214,6 @@ function NewsCard({ item, onClick }) {
                     </div>
                   </div>
                 )}
-              </span>
-            );
-          })()}
-          {(() => {
-            const imp = newsTier(item);
-            const iClr = imp.tier === "Key" ? COLORS.purple : imp.tier === "Notable" ? COLORS.accent : COLORS.muted;
-            const iDots = imp.tier === "Key" ? "◆◆◆" : imp.tier === "Notable" ? "◆◆" : "◆";
-            return (
-              <span style={{ fontSize: 10, color: COLORS.muted, display: "flex", alignItems: "center", gap: 3 }}>
-                News:&nbsp;
-                <span style={{ color: iClr, fontSize: 10, letterSpacing: 1 }}>{iDots}</span>
-                <span style={{ color: iClr }}>{imp.tier}</span>
               </span>
             );
           })()}
@@ -2221,7 +2148,7 @@ export default function CryptoDashboard() {
   const isAdmin = useIsAdmin();
   const [activeNav, setActiveNav]         = useState("Dashboard");
   const [newsTab, setNewsTab]             = useState("all");
-  const [coinFilter, setCoinFilter]       = useState("all"); // "all" | "btc" | "eth"
+  const [coinFilter, setCoinFilter]       = useState("all"); // "all" | "btc"; ETH UI disabled until an ETH-specific model is trained
   const [selectedPair, setSelectedPair]   = useState("BINANCE:BTCUSDT");
   const [selectedSymbol, setSelectedSymbol] = useState("BTCUSDT");
   const [chartInterval, setChartInterval] = useState("15m");
@@ -2300,6 +2227,12 @@ export default function CryptoDashboard() {
   const hotConnected = useWebSocket("/ws/hot", (item) => {
     setHotSignals(prev => sortByTime([clientNormalize(item), ...prev]).slice(0, 50));
   });
+
+  // Do not carry an opened news item between pages. Otherwise a news selected
+  // on Dashboard can reopen as a modal when entering News & Sentiment.
+  useEffect(() => {
+    setSelectedNews(null);
+  }, [activeNav]);
 
   // Polling fallback — catch items missed by WebSocket (60 s interval)
   useEffect(() => {
@@ -2424,7 +2357,6 @@ export default function CryptoDashboard() {
   const navItems = [
     { icon: <NavIcon d={["M3 3v18h18", "M7 16l4-4 4 4 4-8"]} />, label: "Dashboard" },
     { icon: <NavIcon d={["M4 22h16a2 2 0 002-2V4a2 2 0 00-2-2H8L4 6v14a2 2 0 002 2z", "M8 2v4H4", "M12 12h4", "M12 16h4", "M8 12h.01", "M8 16h.01"]} />, label: "News & Sentiment" },
-    { icon: <NavIcon d="M9 3H5a2 2 0 00-2 2v4m6-6h10a2 2 0 012 2v4M9 3v18m0 0h10a2 2 0 002-2V9M9 21H5a2 2 0 01-2-2V9m0 0h18" />, label: "Analyze" },
     ...(isAdmin ? [
       { icon: <NavIcon d="M12 2a4 4 0 014 4c0 1.5-.8 2.8-2 3.5V12h2a2 2 0 012 2v6H6v-6a2 2 0 012-2h2V9.5C8.8 8.8 8 7.5 8 6a4 4 0 014-4z" />, label: "Model Analysis" },
       { icon: <NavIcon d={["M18 20V10", "M12 20V4", "M6 20v-6"]} />, label: "Training Data" },
@@ -2501,9 +2433,8 @@ export default function CryptoDashboard() {
             {[
               { id: "all", label: "All Coins", icon: "◎", color: COLORS.accent },
               { id: "btc", label: "Bitcoin",   icon: "₿",  color: "#F7931A" },
-              { id: "eth", label: "Ethereum",  icon: "Ξ",  color: "#627EEA" },
             ].map(c => (
-              <div key={c.id} onClick={() => { setCoinFilter(c.id); if (c.id !== "all") { setSelectedSymbol(c.id === "btc" ? "BTCUSDT" : "ETHUSDT"); setSelectedPair(`BINANCE:${c.id === "btc" ? "BTCUSDT" : "ETHUSDT"}`); } }} style={{
+              <div key={c.id} onClick={() => { setCoinFilter(c.id); if (c.id !== "all") { setSelectedSymbol("BTCUSDT"); setSelectedPair("BINANCE:BTCUSDT"); } }} style={{
                 display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 10,
                 cursor: "pointer", marginBottom: 3, transition: "all 0.15s",
                 background: coinFilter === c.id ? `${c.color}15` : "transparent",
@@ -2563,7 +2494,6 @@ export default function CryptoDashboard() {
                       {[
                         { id: "all", label: "All",       color: COLORS.accent },
                         { id: "btc", label: "₿ BTC",     color: "#F7931A" },
-                        { id: "eth", label: "Ξ ETH",     color: "#627EEA" },
                       ].map(c => (
                         <button key={c.id} onClick={() => setCoinFilter(c.id)} style={{
                           padding: "6px 11px", borderRadius: 999, border: `1px solid ${coinFilter === c.id ? `${c.color}80` : COLORS.border}`, cursor: "pointer", fontSize: 11,
@@ -2631,12 +2561,11 @@ export default function CryptoDashboard() {
           {/* ── Dashboard (main) ── */}
           {activeNav === "Dashboard" && (
             <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-              {/* Chart header — BTC / ETH switcher + interval + clock */}
+              {/* Chart header — BTC model/chart + interval + clock */}
               <div style={{ padding: "12px 20px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", alignItems: "center", gap: 12, background: "rgba(18,16,27,0.72)", backdropFilter: "blur(18px)", flexShrink: 0, position: "sticky", top: 0, zIndex: 10 }}>
                 <div style={{ display: "flex", gap: 6 }}>
                   {[
                     { sym: "BTCUSDT", label: "₿ BTC", color: "#F7931A" },
-                    { sym: "ETHUSDT", label: "Ξ ETH", color: "#627EEA" },
                   ].map(({ sym, label, color }) => (
                     <button key={sym} onClick={() => { setSelectedSymbol(sym); setSelectedPair(`BINANCE:${sym}`); }} style={{
                       padding: "7px 16px", borderRadius: 999, fontSize: 12, cursor: "pointer", fontWeight: 800,
@@ -2670,13 +2599,12 @@ export default function CryptoDashboard() {
                 </div>
               </div>
 
-              {/* Single chart — switches between BTC and ETH */}
+              {/* Single chart — BTC-only because the deployed model is BTC-impact trained */}
               <div style={{ flex: 1, minHeight: 0, borderBottom: `1px solid ${COLORS.border}` }}>
                 <BinanceChart symbol={selectedPair} interval={chartInterval}
                   news={allNews.filter(n => {
                     const c = classifyNewsCoin(n.title);
-                    const sym = selectedSymbol === "ETHUSDT" ? "eth" : "btc";
-                    return c === sym || c === "both";
+                    return c === "btc" || c === "both";
                   })} />
               </div>
 
@@ -2743,17 +2671,6 @@ export default function CryptoDashboard() {
                 <ExplainPanel selectedNews={selectedNews} onClose={() => setSelectedNews(null)} />
 
               </div>
-            </div>
-          )}
-
-          {/* ── Analyze view ── */}
-          {activeNav === "Analyze" && (
-            <div style={{ flex: 1, overflowY: "auto" }}>
-              <CustomAnalyzer />
-              <div style={{ borderTop: `2px solid ${COLORS.border2}`, margin: "24px 24px 0" }} />
-              <ModelAnalysis />
-              <div style={{ borderTop: `2px solid ${COLORS.border2}`, margin: "0 24px" }} />
-              <ChannelAnalysisPage />
             </div>
           )}
 
