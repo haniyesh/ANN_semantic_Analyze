@@ -12,9 +12,9 @@ Flow:
      CryptoBERT embedding is shared — no duplicate forward pass.
   3. Run through the 15-minute XGBoost BERT + RAG model (1578 features)
   4. Route using the canonical impact contract (see config.py):
-     - Medium:  score_15m >= 0.43
-     - High:    score_15m >= 0.60 (alert when sentiment confidence >= 60%)
-     - Critical: score_15m >= 0.80 (always alert while fresh)
+     - Hot:      score_15m >= 0.60, confidence >= 70%, positive/negative
+     - Moderate: score_15m >= 0.40 and confidence >= 60%
+       or score_15m >= 0.60 with neutral sentiment
 """
 
 import asyncio
@@ -71,7 +71,7 @@ from storage.database import (
     save_news, save_price_movement,
 )
 from log import get_logger
-from pipeline.feature_contract import build_bert_rag_features
+from pipeline.feature_contract import SENTIMENT_KEYS, build_bert_rag_features
 _log = get_logger("main")
 
 
@@ -117,7 +117,8 @@ def _normalize_score(raw: float, min_val: float, max_val: float) -> float:
 
 # ── DISPLAY THRESHOLDS ───────────────────────────────────────────────
 # All thresholds imported from config.py (single source of truth)
-# Tiers (score/confidence): Show (≥0.30/0.62) | Medium (≥0.55/0.70) | Hot (≥0.80/0.78) | Hidden (below Show)
+# Tiers: Hot (score >= 0.60, confidence >= 70%, directional) |
+# Moderate (score >= 0.40, confidence >= 60%; high-score neutral is Moderate)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -318,6 +319,9 @@ def build_xgb_features(
         type_probs = np.zeros(11, dtype=np.float32)
 
     rag = rag_features if rag_features is not None else np.zeros(10, dtype=np.float32)
+    missing_sentiment = [key for key in SENTIMENT_KEYS if key not in sent]
+    if missing_sentiment:
+        raise ValueError(f"sentiment payload missing feature columns: {missing_sentiment}")
     return build_bert_rag_features(
         sent, cb_embedding, fb_embedding, type_probs, macro, rag
     )
@@ -445,12 +449,14 @@ def query_rag(title: str, published_ts: int, channel: str) -> tuple[np.ndarray, 
 # ══════════════════════════════════════════════════════════════════
 # HOT SIGNAL CHECK
 # ══════════════════════════════════════════════════════════════════
-def is_hot(model_score: float, confidence: float, age_minutes: float) -> bool:
-    """Alert on Critical impact, or High impact with reliable direction."""
-    score = abs(model_score)
-    return age_minutes < HOT_MAX_AGE_MIN and (
-        score >= SCORE_THRESHOLD_HOT
-        or (score >= HOT_MIN_MODEL_SCORE and confidence >= HOT_MIN_CONFIDENCE)
+def is_hot(model_score: float, confidence: float, age_minutes: float, sentiment: str = "") -> bool:
+    """Hot alert: high score, high confidence, and clear bullish/bearish direction."""
+    directional = str(sentiment or "").lower() in {"positive", "negative"}
+    return (
+        age_minutes < HOT_MAX_AGE_MIN
+        and abs(model_score) >= HOT_MIN_MODEL_SCORE
+        and confidence >= HOT_MIN_CONFIDENCE
+        and directional
     )
 
 
@@ -714,6 +720,18 @@ async def process_news_item(news: dict):
             avg_pos, avg_neg,
         )
     except Exception:
+        sent.update({
+            "cb_prob_pos": sent.get("prob_positive", 0.0),
+            "cb_prob_neg": sent.get("prob_negative", 0.0),
+            "cb_prob_neu": sent.get("prob_neutral", 0.0),
+            "fb_prob_pos": sent.get("prob_positive", 0.0),
+            "fb_prob_neg": sent.get("prob_negative", 0.0),
+            "fb_prob_neu": sent.get("prob_neutral", 0.0),
+            "rb_prob_pos": sent.get("prob_positive", 0.0),
+            "rb_prob_neg": sent.get("prob_negative", 0.0),
+            "rb_prob_neu": sent.get("prob_neutral", 0.0),
+            "net_agreement": sent.get("prob_positive", 0.0) - sent.get("prob_negative", 0.0),
+        })
         sent["sentiment_reliable"] = True  # fallback: assume reliable
 
     # ── Step 1c: FinBERT embedding (offloaded) ─────────────────────
@@ -778,7 +796,11 @@ async def process_news_item(news: dict):
         "score_normalized": True,
         "pred_15m":         model_result["pred_15m"],
         "confidence_model": model_result.get("confidence_model", 0.0),
-        "impact":           impact_tier(model_score),
+        "impact":           impact_tier(
+            model_score,
+            confidence=confidence_pct,
+            sentiment=sent["sentiment"],
+        ),
         "age_minutes":      round(age_minutes, 1),
         "published_ts":     published_ts,
         "link":             news.get("link", ""),
@@ -807,24 +829,27 @@ async def process_news_item(news: dict):
     except Exception as exc:
         _log.error("Failed to persist RAG outcome job: %s", exc)
 
-    # ── Step 6: Route ─────────────────────────────────────────────
+    # ── Step 6: Persist + route ───────────────────────────────────
+    # Store every valid scored item in the dashboard/API cache. The API and
+    # frontend apply the Hot/Moderate display gate, so Low items remain hidden
+    # from the dashboard while still preserving restart continuity and RAG data.
+    await send_to_dashboard(payload)
+
     if should_display_in_all(model_score, confidence_pct / 100, title):
         _log.info(
             "%s | w=%s | score=%.2f | conf=%s%% | %s | %s",
             signal_type, sent['weight'], model_score, confidence_pct,
             pub_dt.strftime('%Y-%m-%d %H:%M UTC'), title[:55],
         )
-        await send_to_dashboard(payload)
     else:
         _log.debug(
-            "Filtered | score=%.2f conf=%s%% | %s | %s",
+            "Stored as Low (hidden from dashboard) | score=%.2f conf=%s%% | %s | %s",
             model_score, confidence_pct,
             pub_dt.strftime('%Y-%m-%d %H:%M UTC'), title[:50],
         )
-        return
 
     # HOT → Telegram
-    if is_hot(model_score, confidence_pct / 100, age_minutes):
+    if is_hot(model_score, confidence_pct / 100, age_minutes, sent["sentiment"]):
         _log.info("HOT SIGNAL | Posting to Telegram")
         await post_hot_to_telegram(payload)
 

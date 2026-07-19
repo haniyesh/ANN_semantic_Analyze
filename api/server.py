@@ -74,7 +74,7 @@ class ExplainRequest(BaseModel):
 from config import (
     API_HOST, API_PORT, GROQ_API_KEYS, GROQ_CLASSIFICATION_MODEL, validate_api,
     SCORE_THRESHOLD_HOT, SCORE_THRESHOLD_MEDIUM, SCORE_THRESHOLD_SHOW,
-    CONF_SHOW, CONF_MEDIUM, CONF_HIGH,
+    CONF_SHOW, CONF_MEDIUM, CONF_HOT,
     impact_tier as _config_impact_tier,
 )
 from log import setup_logging, get_logger
@@ -166,9 +166,9 @@ def _passes_noise_filter(item: dict) -> bool:
 
 # Impact / gate thresholds — imported from config.py (single source of truth).
 # Applied to the production 15-minute model_score. Confidence is 0–100 here.
-SCORE_HOT  = SCORE_THRESHOLD_HOT       # Critical: 0.80
-SCORE_MED  = SCORE_THRESHOLD_MEDIUM    # High / Important: 0.60
-SCORE_SHOW = SCORE_THRESHOLD_SHOW      # Medium: 0.43
+SCORE_HOT  = SCORE_THRESHOLD_HOT       # Hot: 0.60 + directional confidence
+SCORE_MED  = SCORE_THRESHOLD_MEDIUM    # Moderate: 0.40 + confidence
+SCORE_SHOW = SCORE_THRESHOLD_SHOW      # chart/display signal minimum
 SCORE_HIGH = SCORE_HOT                 # alias used in hot_news / explain endpoint
 CONF_MIN   = CONF_SHOW * 100           # config is 0–1; server compares against 0–100 confidence
 
@@ -178,15 +178,30 @@ def _live_score(item: dict) -> float:
     return abs(float(item.get("model_score", 0) or 0))
 
 
+def _display_score(item: dict) -> float:
+    """Score used for dashboard display gates.
+
+    Live rows use the model prediction. Historical CSV rows do not carry a live
+    prediction, so they use realized 15-minute impact strictly for display.
+    """
+    score = item.get("model_score")
+    if score is None and item.get("is_realized"):
+        score = item.get("realized_impact")
+    return abs(float(score or 0))
+
+
 def _recompute_impact(item: dict) -> str:
-    """Impact badge recomputed live from scores — single source of truth is config.impact_tier().
-    Vocabulary: Hot | Medium | Show | Low"""
-    return _config_impact_tier(item.get("model_score", 0) or 0)
+    """Impact badge recomputed live from score, confidence, and sentiment."""
+    return _config_impact_tier(
+        _display_score(item),
+        confidence=item.get("confidence", 0) or 0,
+        sentiment=item.get("sentiment", ""),
+    )
 
 
 def _passes_display(item: dict) -> bool:
-    """Display gate: confidence >= CONF_MIN. Score gate uses SCORE_SHOW for feed."""
-    return float(item.get("confidence", 0) or 0) >= CONF_MIN and _live_score(item) >= SCORE_SHOW
+    """Display gate for signal/chart views: show Moderate and Hot only."""
+    return _recompute_impact(item) != "Low"
 
 
 def _gate_feed(items: list) -> list:
@@ -195,7 +210,7 @@ def _gate_feed(items: list) -> list:
 
 
 def _prepare_all_news(items: list) -> list:
-    """Prepare the general news feed without applying signal thresholds."""
+    """Prepare news without applying signal thresholds."""
     return [{**i, "impact": _recompute_impact(i)} for i in items]
 
 # ── News Importance — imported from config ──
@@ -251,10 +266,10 @@ def _load_cache() -> List[dict]:
 
 all_news: List[dict] = _load_cache()
 
-# Hot is determined only by the deployed 15-minute score.
+# Hot requires score, confidence, and clear positive/negative sentiment.
 hot_news: List[dict] = [
     item for item in all_news
-    if _live_score(item) >= SCORE_HOT
+    if _recompute_impact(item) == "Hot"
 ]
 
 _log.info("Loaded %d news items from cache  (%d hot)", len(all_news), len(hot_news))
@@ -367,6 +382,9 @@ historical_dates_index: List[dict] = [
      "channel": i["channel"], "link": i.get("link", ""),
      "model_score": i["model_score"], "sentiment": i.get("sentiment", ""),
      "confidence": i.get("confidence", 50), "impact": i.get("impact", "low"),
+     "prob_positive": i.get("prob_positive", 0), "prob_negative": i.get("prob_negative", 0),
+     "prob_neutral": i.get("prob_neutral", 0), "realized_impact": i.get("realized_impact", 0),
+     "is_realized": True,
      "score_normalized": True}
     for i in _all_hist
 ]
@@ -685,7 +703,7 @@ async def ingest_news(item: IngestNewsItem, x_api_key: str = Header(default=""))
     # Prepend to in-memory list and trim to MAX_CACHE_ITEMS
     MAX = 10_000
     all_news = ([item] + all_news)[:MAX]
-    if _live_score(item) >= SCORE_HOT:
+    if _recompute_impact(item) == "Hot":
         hot_news = ([item] + hot_news)[:MAX]
     _idf_cache = None
     _combined_cache = None
@@ -717,7 +735,7 @@ async def ingest_news(item: IngestNewsItem, x_api_key: str = Header(default=""))
 
     # Broadcast to WebSocket clients
     await _broadcast(_ws_all_clients, item)
-    if _live_score(item) >= SCORE_HOT:
+    if _recompute_impact(item) == "Hot":
         await _broadcast(_ws_hot_clients, item)
 
     return {"status": "ok"}
@@ -726,7 +744,7 @@ async def ingest_news(item: IngestNewsItem, x_api_key: str = Header(default=""))
 @app.get("/news/since")
 def get_since(ts: int = 0):
     """Return items with published_ts > ts — for incremental frontend polling."""
-    items = _prepare_all_news([
+    items = _gate_feed([
         i for i in _get_combined()
         if float(i.get("published_ts") or i.get("received_at", 0)) > ts
     ])
@@ -770,9 +788,9 @@ def get_config():
         "score_show":         SCORE_SHOW,
         "conf_min":           CONF_MIN,
         "conf_moderate":      CONF_MEDIUM * 100,
-        "conf_high":          CONF_HIGH * 100,
+        "conf_hot":           CONF_HOT * 100,
         "reliable_channels":  ["the_block_crypto", "coindesk", "cointelegraph", "WatcherGuru", "google_news"],
-        "impact_labels":      ["Critical", "High", "Medium", "Low"],
+        "impact_labels":      ["Hot", "Moderate", "Low"],
     }
 
 
@@ -909,7 +927,7 @@ def get_all(response: Response, limit: int = 500, offset: int = 0):
     Use ?limit=N&offset=M for cursor-style pagination. Clients should
     request only what they render — avoid limit > 2000.
     """
-    combined = _prepare_all_news(sorted(
+    combined = _gate_feed(sorted(
         _get_combined(),
         key=lambda x: x.get("published_ts") or x.get("received_at") or 0,
         reverse=True,
@@ -940,7 +958,7 @@ def get_dates():
 
 @app.get("/news/by-date")
 def get_by_date(start: int, end: int):
-    return _prepare_all_news([
+    return _gate_feed([
         item for item in all_news + historical_dates_index  # dates index kept separate
         if start <= float(item.get("published_ts") or item.get("received_at", 0)) <= end
     ])
@@ -1416,7 +1434,7 @@ async def explain_news(request: Request, item: ExplainRequest):
     channel   = item.channel
     similar   = item.similar
     max_score = score
-    impact = _config_impact_tier(score)
+    impact = _config_impact_tier(score, confidence=confidence, sentiment=sentiment)
 
     sim_block = "No similar historical news found."
     if similar:
@@ -1702,7 +1720,7 @@ def _analyze_custom_sync(title: str) -> dict:
         p15  = float(clf15.predict_proba(X)[0, 1])
         pred = int(p15 >= thr15)
 
-        impact = _config_impact_tier(p15)
+        impact = _config_impact_tier(p15, confidence=sent["confidence"], sentiment=sent["sentiment"])
         signal = "BUY" if sent["sentiment"] == "positive" else ("SELL" if sent["sentiment"] == "negative" else "NEUTRAL")
 
         from training.xgboost_train_groq import crypto_news_type_classify
@@ -1725,7 +1743,7 @@ def _analyze_custom_sync(title: str) -> dict:
         explanation = (
             f"Classified as {type_label} news. "
             f"Model votes: {model_votes}. Final: {sent_word} (equal 1/3 ensemble). "
-            f"{'Short-term price impact predicted.' if impact in ('Hot','Medium') else 'No strong short-term price impact predicted.'}"
+            f"{'Short-term price impact predicted.' if impact in ('Hot','Moderate') else 'No strong short-term price impact predicted.'}"
         )
 
         try:

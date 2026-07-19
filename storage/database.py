@@ -2,6 +2,7 @@ import os
 import ssl
 import asyncpg
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 from config import DATABASE_URL
 
 
@@ -9,17 +10,20 @@ from config import DATABASE_URL
 # 🔌 DATABASE CONNECTION
 # ==============================
 async def create_pool():
-    # Verify TLS by default. Disabling certificate verification exposes the
-    # connection to MITM, so it is opt-in via DB_SSL_INSECURE=1 (only for
-    # local/dev databases with self-signed certs). For production, point
-    # DB_SSL_CA at the provider's CA bundle instead.
-    ssl_context = ssl.create_default_context()
-    ca_file = os.getenv("DB_SSL_CA")
-    if ca_file and os.path.exists(ca_file):
-        ssl_context.load_verify_locations(cafile=ca_file)
-    if os.getenv("DB_SSL_INSECURE", "0") == "1":
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
+    # Local PostgreSQL normally has no host-valid TLS certificate. Use plain
+    # local TCP unless SSL is explicitly requested; keep remote DBs verified.
+    db_host = (urlparse(DATABASE_URL or "").hostname or "").lower()
+    ssl_mode = os.getenv("DB_SSL_MODE", "").lower()
+    local_hosts = {"localhost", "127.0.0.1", "::1", "postgres"}
+    ssl_context = False
+    if ssl_mode not in {"disable", "off", "false", "0"} and db_host not in local_hosts:
+        ssl_context = ssl.create_default_context()
+        ca_file = os.getenv("DB_SSL_CA")
+        if ca_file and os.path.exists(ca_file):
+            ssl_context.load_verify_locations(cafile=ca_file)
+        if os.getenv("DB_SSL_INSECURE", "0") == "1":
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
     pool = await asyncpg.create_pool(
         dsn=DATABASE_URL,
         ssl=ssl_context,

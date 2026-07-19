@@ -329,7 +329,12 @@ def main():
             p1h  = 0.0
             pred15 = int(p15 >= thr15)
             pred1h = 0
-            impact = _impact_tier(p15, p1h)
+            impact = _impact_tier(
+                p15,
+                p1h,
+                confidence=sent["confidence"],
+                sentiment=sent["sentiment"],
+            )
 
             results.append({
                 "id":               f"sample_{_hash(title)}",
@@ -386,9 +391,9 @@ def main():
     impacts = Counter(r["impact"] for r in results)
     preds15 = sum(1 for r in results if r["pred_15m"])
     preds1h = sum(1 for r in results if r["pred_1h"])
-    print(f"  High   : {impacts.get('High', 0):,}")
-    print(f"  Medium : {impacts.get('Medium', 0):,}")
-    print(f"  Low    : {impacts.get('Low', 0):,}")
+    print(f"  Hot      : {impacts.get('Hot', 0):,}")
+    print(f"  Moderate : {impacts.get('Moderate', 0):,}")
+    print(f"  Low      : {impacts.get('Low', 0):,}")
     print(f"  pred_15m=1 : {preds15:,}  ({preds15*100//max(len(results),1)}%)")
     print(f"  pred_1h=1  : {preds1h:,}  ({preds1h*100//max(len(results),1)}%)")
     print(f"\n  Saved {len(all_items)} items → {CACHE_PATH}")

@@ -33,9 +33,9 @@ HF_API_KEY          = os.getenv("HF_API_KEY")
 # reliability and does not redefine the model's impact probability.
 #
 # User-facing impact contract:
-# Critical ≥ 0.80; High/Important ≥ 0.60; Medium ≥ 0.43; Low < 0.43.
-# Impact is independent of sentiment confidence. Confidence only determines
-# whether bullish/bearish direction is reliable enough for a non-critical alert.
+# Hot:      score >= 0.60 and confidence >= 70%, with positive/negative sentiment.
+# Moderate: score >= 0.40 and confidence >= 60%, or score >= 0.60 when neutral.
+# Low:      everything else.
 DASHBOARD_API        = os.getenv("DASHBOARD_API", "http://localhost:8000")
 SCORE_15M_MIN        = 0.0
 SCORE_15M_MAX        = 1.0
@@ -43,24 +43,24 @@ SCORE_1H_MIN         = 0.0
 SCORE_1H_MAX         = 1.0
 
 # Impact badge / gate thresholds — applied to the production 15-minute score.
-SCORE_THRESHOLD_HOT    = 0.80   # user-facing Critical
-SCORE_THRESHOLD_MEDIUM = 0.60   # user-facing High / Important
-SCORE_THRESHOLD_SHOW   = 0.43   # user-facing Medium / chart minimum
+SCORE_THRESHOLD_HOT    = 0.60   # Hot requires directional sentiment + CONF_HOT
+SCORE_THRESHOLD_MEDIUM = 0.40   # user-facing Moderate
+SCORE_THRESHOLD_SHOW   = SCORE_THRESHOLD_MEDIUM
 SCORE_THRESHOLD_HIGH   = SCORE_THRESHOLD_MEDIUM
 
 # Confidence floors — one per tier, scaled by news importance
-CONF_SHOW   = 0.00   # confidence never hides otherwise valid news
+CONF_SHOW   = 0.60   # dashboard/chart minimum for Moderate
 CONF_MEDIUM = 0.60   # moderate sentiment confidence
-CONF_HOT    = 0.60   # high-impact alert direction floor
-CONF_HIGH   = 0.70   # high sentiment reliability label
+CONF_HOT    = 0.70   # Hot sentiment confidence
+CONF_HIGH   = CONF_HOT
 CONF_MIN    = CONF_SHOW   # legacy alias = display floor
 
-# "Show" tier — minimum to display in dashboard feed (score AND confidence gate)
+# Dashboard/chart signal tier — minimum to display as Moderate.
 IMPORTANT_MIN_SCORE      = SCORE_THRESHOLD_SHOW
 IMPORTANT_MIN_CONFIDENCE = CONF_SHOW
 IMPORTANT_MIN_SCORE_1H   = SCORE_THRESHOLD_SHOW
 
-# "Hot" tier — triggers Telegram alert (uses max of both scores)
+# "Hot" tier — triggers Telegram alert.
 HOT_MIN_MODEL_SCORE      = SCORE_THRESHOLD_HIGH
 HOT_MIN_CONFIDENCE       = CONF_HOT
 HOT_MIN_MODEL_SCORE_1H   = SCORE_THRESHOLD_HOT   # 1h also checked via max()
@@ -69,19 +69,27 @@ HOT_MAX_AGE_MIN          = 30
 BATCH_SIZE           = 3
 
 
-def impact_tier(score_15m, score_1h=None) -> str:
+def _confidence_fraction(confidence) -> float:
+    c = float(confidence or 0)
+    return c / 100.0 if c > 1 else c
+
+
+def impact_tier(score_15m, score_1h=None, confidence=0, sentiment="") -> str:
     """Canonical live impact badge from the production 15-minute score.
 
     ``score_1h`` remains accepted for compatibility with historical callers but
     intentionally does not affect live routing.
-    Internal compatibility labels map to user labels as follows:
-    Hot=Critical, Medium=High, Show=Medium, Low=Low."""
+    Returns one of: Hot | Moderate | Low."""
     s = abs(float(score_15m or 0))
-    if s >= SCORE_THRESHOLD_HOT:
+    c = _confidence_fraction(confidence)
+    directional = str(sentiment or "").lower() in {"positive", "negative"}
+    if s >= SCORE_THRESHOLD_HOT and c >= CONF_HOT and directional:
         return "Hot"
-    if s >= SCORE_THRESHOLD_MEDIUM:
-        return "Medium"
-    return "Show" if s >= SCORE_THRESHOLD_SHOW else "Low"
+    if s >= SCORE_THRESHOLD_MEDIUM and c >= CONF_MEDIUM:
+        return "Moderate"
+    if s >= SCORE_THRESHOLD_HOT and not directional:
+        return "Moderate"
+    return "Low"
 
 # ── News Importance (editorial importance — independent of price impact) ──
 import re as _re

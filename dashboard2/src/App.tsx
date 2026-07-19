@@ -15,27 +15,30 @@ const toLocalDate = (ts) => {                            // unix seconds → loc
 };
 
 const COLORS = {
-  bg:        "#050810",
-  panel:     "#080c14",
-  card:      "rgba(255,255,255,0.03)",
-  border:    "rgba(255,255,255,0.06)",
-  border2:   "rgba(255,255,255,0.10)",
-  accent:    "#00d4aa",
-  accentDim: "#00d4aa18",
-  accentGlow:"0 0 24px rgba(0,212,170,0.18)",
+  bg:        "#050507",
+  panel:     "rgba(18,16,27,0.82)",
+  card:      "rgba(255,255,255,0.035)",
+  border:    "rgba(211,196,255,0.075)",
+  border2:   "rgba(211,196,255,0.14)",
+  accent:    "#7c4dff",
+  accent2:   "#c4b5fd",
+  accentDim: "rgba(124,77,255,0.18)",
+  accentGlow:"0 0 28px rgba(124,77,255,0.28)",
   gold:      "#f59e0b",
   goldGlow:  "0 0 18px rgba(245,158,11,0.20)",
   red:       "#f43f5e",
   redGlow:   "0 0 18px rgba(244,63,94,0.22)",
   green:     "#10b981",
   greenGlow: "0 0 18px rgba(16,185,129,0.20)",
-  blue:      "#3b82f6",
-  purple:    "#a855f7",
-  text:      "#f1f5f9",
-  muted:     "#64748b",
-  muted2:    "#1e293b",
-  glass:     "rgba(255,255,255,0.04)",
-  glassBorder:"rgba(255,255,255,0.08)",
+  blue:      "#60a5fa",
+  purple:    "#b48cff",
+  text:      "#f7f5ff",
+  muted:     "#8b8798",
+  muted2:    "#221d32",
+  glass:     "rgba(255,255,255,0.045)",
+  glassBorder:"rgba(211,196,255,0.12)",
+  brandGradient: "linear-gradient(135deg, #f8f7ff 0%, #d8ccff 48%, #9ca3ff 100%)",
+  siteBg: "radial-gradient(circle at 48% 18%, rgba(124,77,255,0.18), transparent 31%), radial-gradient(circle at 78% 48%, rgba(244,63,94,0.08), transparent 30%), linear-gradient(180deg, #09080d 0%, #050507 58%, #030304 100%)",
 };
 
 const marketPairs = [
@@ -80,31 +83,70 @@ function sentimentLabel(s) {
   if (s === "negative") return "Bearish";
   return "Neutral";
 }
+
+function normProb(v) {
+  const n = Number(v || 0);
+  return n > 1 ? n / 100 : n;
+}
+
+function displaySentiment(item) {
+  const raw = item?.sentiment;
+  if (raw === "positive" || raw === "negative") return raw;
+
+  const pos = normProb(item?.prob_positive);
+  const neg = normProb(item?.prob_negative);
+  const neu = normProb(item?.prob_neutral);
+  const dir = Math.max(pos, neg);
+  const other = Math.min(pos, neg);
+
+  // Some ensemble rows are labeled neutral because neutral is the single
+  // largest class, even when the directional probabilities clearly lean.
+  if (dir >= 0.30 && dir - other >= 0.08 && dir >= neu * 0.75) {
+    return pos > neg ? "positive" : "negative";
+  }
+  return "neutral";
+}
+
+function displayScore(item) {
+  const score = item?.model_score ?? item?.realized_impact ?? 0;
+  return Math.abs(Number(score) || 0);
+}
 // Display thresholds — defaults match config.py, fetched live from GET /api/config on mount.
 // All filter/badge functions read from _cfg; no threshold values live in this file.
 const _cfg = {
-  scoreHot:         0.80,
-  scoreMed:         0.60,
-  scoreShow:        0.43,
-  confMin:          0,
+  scoreHot:         0.60,
+  scoreMed:         0.40,
+  scoreShow:        0.40,
+  confMin:          60,
+  confHot:          70,
   reliableChannels: new Set(["the_block_crypto", "coindesk", "cointelegraph", "WatcherGuru", "google_news"]),
 };
 
-function scoreTier(score15, conf) {
+function scoreTier(score15, conf, sentiment) {
   const s = Math.abs(score15 || 0);
   const c = conf || 0;
-  if (c < _cfg.confMin)   return "Hidden";
-  if (s >= _cfg.scoreHot) return "Hot";
-  if (s >= _cfg.scoreMed) return "Medium";
-  return "Show";
+  const directional = sentiment === "positive" || sentiment === "negative";
+  if (s >= _cfg.scoreHot && c >= _cfg.confHot && directional) return "Hot";
+  if (s >= _cfg.scoreHot && !directional) return "Moderate";
+  if (c < _cfg.confMin) return "Hidden";
+  if (s >= _cfg.scoreMed) return "Moderate";
+  return "Low";
 }
 
-// Internal compatibility tiers map to the user-facing impact vocabulary.
 function impactDisplayLabel(tier) {
-  if (tier === "Hot") return "Critical";
-  if (tier === "Medium") return "High";
-  if (tier === "Show") return "Medium";
+  if (tier === "Hot") return "Hot";
+  if (tier === "Moderate") return "Moderate";
   return "Low";
+}
+
+function shouldShowSourceBadge(source = "") {
+  const s = String(source || "").toLowerCase();
+  if (!s) return false;
+  return !(
+    s.startsWith("live_xgb") ||
+    s.startsWith("historical_xgb") ||
+    s === "groq_only"
+  );
 }
 
 // ── News Importance (editorial importance — independent of price impact) ──
@@ -163,12 +205,11 @@ function cleanTitle(title = "") {
 function passesFilter(n) {
   const conf = n.confidence || 0;
   return _cfg.reliableChannels.has(n.channel)
-    && conf >= _cfg.confMin
+    && scoreTier(displayScore(n), conf, n.sentiment) !== "Low"
     && (n.title || "").trim().length >= 20;
 }
 function passesChartFilter(n) {
-  const s = Math.abs(n.model_score || 0);
-  return passesFilter(n) && s >= _cfg.scoreShow;
+  return passesFilter(n);
 }
 function channelLogo(channel = "") {
   const c = channel.toLowerCase();
@@ -498,7 +539,7 @@ function BinanceChart({ symbol, interval = "1h", news = [] }: { symbol: string; 
     const ivSec = intervalSeconds[interval] || 3600;
 
     // ── News markers: deduplicated per candle, max 1 per candle ────
-    // High (≥0.67, s1h≥0.60, conf≥60%) = prominent dot on chart
+    // Hot/Moderate display thresholds come from config.py via /config.
     // Keep only the highest-scoring item per candle bucket
     const buckets = new Map();
     news
@@ -506,17 +547,18 @@ function BinanceChart({ symbol, interval = "1h", news = [] }: { symbol: string; 
       .forEach(n => {
         const bucket = Math.floor((n.published_ts || 0) / ivSec) * ivSec;
         const prev = buckets.get(bucket);
-        if (!prev || Math.abs(n.model_score ?? 0) > Math.abs(prev.model_score || 0))
+        if (!prev || displayScore(n) > displayScore(prev))
           buckets.set(bucket, n);
       });
     // Save bucket→news for tooltip lookup
     markerNewsRef.current = new Map();
     const newsSignals: any[] = [];
     buckets.forEach((n, bucket) => {
-      const isHot = Math.abs(n.model_score || 0) >= _cfg.scoreHot;
+      const isHot = scoreTier(displayScore(n), n.confidence, n.sentiment) === "Hot";
       const t     = bucket + TZ_OFFSET;
-      const pos   = n.sentiment === "positive" ? "belowBar" : "aboveBar";
-      const color = n.sentiment === "positive" ? "#22c55e" : "#ef4444";
+      const markerSent = displaySentiment(n);
+      const pos   = markerSent === "positive" ? "belowBar" : "aboveBar";
+      const color = markerSent === "positive" ? "#22c55e" : markerSent === "negative" ? "#ef4444" : COLORS.muted;
       newsSignals.push({ time: t, position: pos, color, shape: "circle", text: "", size: isHot ? 1 : 0.5 });
       markerNewsRef.current.set(t, n);
     });
@@ -563,7 +605,7 @@ function BinanceChart({ symbol, interval = "1h", news = [] }: { symbol: string; 
               { h: 22, wickT: 6, wickB: 5, color: COLORS.red,   delay: "0.36s" },
               { h: 30, wickT: 9, wickB: 8, color: COLORS.green, delay: "0.48s" },
               { h: 16, wickT: 4, wickB: 3, color: COLORS.red,   delay: "0.60s" },
-              { h: 38, wickT: 12, wickB: 9, color: COLORS.accent, delay: "0.72s" },
+              { h: 38, wickT: 12, wickB: 9, color: COLORS.green, delay: "0.72s" },
             ].map((c, i) => (
               <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", animation: `chartPulse 1.2s ease-in-out ${c.delay} infinite` }}>
                 <div style={{ width: 2, height: c.wickT, background: c.color, opacity: 0.5, borderRadius: 1 }} />
@@ -574,7 +616,7 @@ function BinanceChart({ symbol, interval = "1h", news = [] }: { symbol: string; 
           </div>
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{ width: 8, height: 8, borderRadius: "50%", background: COLORS.accent, boxShadow: COLORS.accentGlow, animation: "pulse 1.2s ease-in-out infinite" }} />
+              <div style={{ width: 8, height: 8, borderRadius: "50%", background: COLORS.green, boxShadow: COLORS.greenGlow, animation: "pulse 1.2s ease-in-out infinite" }} />
               <span style={{ fontSize: 13, color: COLORS.text, fontWeight: 500, letterSpacing: 0.3 }}>Loading chart</span>
             </div>
           </div>
@@ -595,8 +637,8 @@ function BinanceChart({ symbol, interval = "1h", news = [] }: { symbol: string; 
           pointerEvents: "none",
           boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
         }}>
-          <div style={{ fontSize: 10, color: tooltip.item.sentiment === "positive" ? COLORS.green : COLORS.red, fontWeight: 700, marginBottom: 3 }}>
-            {tooltip.item.sentiment === "positive" ? "▲ BULLISH" : "▼ BEARISH"}
+          <div style={{ fontSize: 10, color: displaySentiment(tooltip.item) === "positive" ? COLORS.green : displaySentiment(tooltip.item) === "negative" ? COLORS.red : COLORS.muted, fontWeight: 700, marginBottom: 3 }}>
+            {displaySentiment(tooltip.item) === "positive" ? "▲ BULLISH" : displaySentiment(tooltip.item) === "negative" ? "▼ BEARISH" : "● NEUTRAL"}
           </div>
           <div style={{ fontSize: 11, color: COLORS.text, lineHeight: 1.4 }}>
             {cleanTitle(tooltip.item.title)}
@@ -704,17 +746,17 @@ function FearGreedGauge() {
 function NavItem({ icon, label, active, onClick }) {
   return (
     <button onClick={onClick} style={{
-      display: "flex", alignItems: "center", gap: 10, padding: "10px 14px",
-      borderRadius: 10, border: `1px solid ${active ? `${COLORS.accent}30` : "transparent"}`,
-      cursor: "pointer", width: "100%", textAlign: "left", marginBottom: 2,
-      background: active ? `${COLORS.accent}12` : "transparent",
-      color: active ? COLORS.accent : COLORS.muted,
+      display: "flex", alignItems: "center", gap: 10, padding: "10px 15px",
+      borderRadius: 999, border: `1px solid ${active ? "rgba(196,181,253,0.28)" : "rgba(211,196,255,0.08)"}`,
+      cursor: "pointer", width: "100%", textAlign: "left", marginBottom: 7,
+      background: active ? "linear-gradient(135deg, rgba(124,77,255,0.30), rgba(196,181,253,0.12))" : "rgba(255,255,255,0.025)",
+      color: active ? COLORS.text : COLORS.muted,
       transition: "all 0.15s",
-      boxShadow: active ? `0 0 16px ${COLORS.accent}15` : "none",
+      boxShadow: active ? "0 0 20px rgba(124,77,255,0.18)" : "none",
     }}>
       <span style={{ fontSize: 15, opacity: active ? 1 : 0.7 }}>{icon}</span>
-      <span style={{ fontSize: 13, fontWeight: active ? 600 : 400, letterSpacing: 0.2 }}>{label}</span>
-      {active && <div style={{ marginLeft: "auto", width: 3, height: 18, borderRadius: 3, background: `linear-gradient(180deg, ${COLORS.accent}, ${COLORS.accent}66)` }} />}
+      <span style={{ fontSize: 12, fontWeight: active ? 800 : 700, letterSpacing: 0.35 }}>{label}</span>
+      {active && <div style={{ marginLeft: "auto", width: 6, height: 6, borderRadius: 999, background: COLORS.accent2, boxShadow: "0 0 12px rgba(196,181,253,0.65)" }} />}
     </button>
   );
 }
@@ -754,12 +796,13 @@ function ExplainPanel({ selectedNews: item, onClose }) {
       .catch(e => { setLoading(false); setExplainErr(String(e)); });
   }, [item?.id]);
 
-  const score      = item ? Math.abs(item.model_score || 0) : 0;
-  const _tier      = item ? scoreTier(score, item.confidence) : "Hidden";
-  const impactClr  = _tier === "Hot" ? COLORS.red : _tier === "Medium" ? "#f97316" : COLORS.muted;
+  const score      = item ? displayScore(item) : 0;
+  const _tier      = item ? scoreTier(score, item.confidence, item.sentiment) : "Hidden";
+  const impactClr  = _tier === "Hot" ? COLORS.red : _tier === "Moderate" ? "#f97316" : COLORS.muted;
   const impactLbl  = impactDisplayLabel(_tier);
   const sentClr    = { positive: COLORS.green, negative: COLORS.red, neutral: COLORS.muted };
-  const sColor     = item ? (sentClr[item.sentiment] || COLORS.muted) : COLORS.muted;
+  const displaySent = item ? displaySentiment(item) : "neutral";
+  const sColor     = item ? (sentClr[displaySent] || COLORS.muted) : COLORS.muted;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -801,10 +844,10 @@ function ExplainPanel({ selectedNews: item, onClose }) {
             <div style={{ marginBottom: 12 }}>
               <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
                 <span style={{ fontSize: 9, padding: "2px 8px", borderRadius: 4, background: `${sColor}18`, color: sColor, fontFamily: "monospace", fontWeight: 700, letterSpacing: 1 }}>
-                  {sentimentLabel(item.sentiment).toUpperCase()}
+                  SENTIMENT: {sentimentLabel(displaySent).toUpperCase()}
                 </span>
                 <span style={{ fontSize: 9, padding: "2px 8px", borderRadius: 4, background: `${impactClr}18`, color: impactClr, fontFamily: "monospace", fontWeight: 700, letterSpacing: 1 }}>
-                  {impactLbl.toUpperCase()}
+                  IMPACT: {impactLbl.toUpperCase()}
                 </span>
               </div>
               <div style={{ fontSize: 12, color: COLORS.text, fontWeight: 600, lineHeight: 1.5 }}>
@@ -928,7 +971,8 @@ function ExplainPanel({ selectedNews: item, onClose }) {
 
 // ══════════════════════════════════════════════════════════════════
 function NewsModal({ item, onClose }) {
-  const label   = sentimentLabel(item.sentiment);
+  const displaySent = displaySentiment(item);
+  const label   = sentimentLabel(displaySent);
   const colors  = { Bullish: COLORS.green, Bearish: COLORS.red, Neutral: COLORS.muted };
   const color   = colors[label];
 
@@ -937,9 +981,9 @@ function NewsModal({ item, onClose }) {
   const [similar, setSimilar]       = useState<SimilarNews[]>(item.similar || []);
   const [simLoading, setSimLoading] = useState(false);
 
-  const score   = Math.abs(item.model_score || 0);
-  const _t = scoreTier(score, item.confidence);
-  const impactColor = _t === "Hot" ? COLORS.red : _t === "Medium" ? "#f97316" : COLORS.muted;
+  const score   = displayScore(item);
+  const _t = scoreTier(score, item.confidence, item.sentiment);
+  const impactColor = _t === "Hot" ? COLORS.red : _t === "Moderate" ? "#f97316" : COLORS.muted;
   const impactLabel = impactDisplayLabel(_t);
 
   // Auto-fetch similar news on open if item has none
@@ -990,7 +1034,7 @@ function NewsModal({ item, onClose }) {
         {/* Header */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 16 }}>
           <span style={{ fontSize: 9, padding: "3px 9px", borderRadius: 4, fontFamily: "monospace", background: `${color}18`, color, letterSpacing: 1, fontWeight: 700 }}>
-            {label.toUpperCase()}
+            SENTIMENT: {label.toUpperCase()}
           </span>
           <button onClick={onClose} style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 18, cursor: "pointer", lineHeight: 1 }}>✕</button>
         </div>
@@ -1027,7 +1071,7 @@ function NewsModal({ item, onClose }) {
               {NEWS_TYPE_LABELS[item.news_type] || item.news_type}
             </span>
           )}
-          {item.source && (
+          {shouldShowSourceBadge(item.source) && (
             <span style={{ fontSize: 9, padding: "3px 10px", borderRadius: 4, background: `${COLORS.border}`, color: COLORS.muted, fontFamily: "monospace" }}>
               {item.source}
             </span>
@@ -1159,7 +1203,8 @@ function NewsModal({ item, onClose }) {
 }
 
 function NewsCard({ item, onClick }) {
-  const label      = sentimentLabel(item.sentiment);
+  const displaySent = displaySentiment(item);
+  const label      = sentimentLabel(displaySent);
   const colors     = { Bullish: COLORS.green, Bearish: COLORS.red, Neutral: COLORS.muted };
   const color      = colors[label];
   const logo       = channelLogo(item.channel || item.source);
@@ -1169,16 +1214,18 @@ function NewsCard({ item, onClick }) {
   return (
     <div onClick={onClick} style={{
       display: "flex", gap: 12, padding: "11px 14px", margin: "0 0 6px",
-      borderRadius: 12, cursor: "pointer", transition: "background 0.15s",
-      background: COLORS.glass, border: `1px solid ${COLORS.glassBorder}`,
-      backdropFilter: "blur(8px)",
+      borderRadius: 8, cursor: "pointer", transition: "all 0.15s",
+      background: "linear-gradient(135deg, rgba(255,255,255,0.055), rgba(124,77,255,0.035))",
+      border: `1px solid ${COLORS.glassBorder}`,
+      backdropFilter: "blur(12px)",
+      boxShadow: "0 10px 30px rgba(0,0,0,0.18)",
     }}>
-      <div style={{ width: 38, height: 38, borderRadius: 10, background: "rgba(255,255,255,0.06)", border: `1px solid ${COLORS.glassBorder}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0, position: "relative" }}>
+      <div style={{ width: 38, height: 38, borderRadius: 8, background: "rgba(196,181,253,0.08)", border: `1px solid ${COLORS.glassBorder}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0, position: "relative" }}>
         {logo}
-        {item.sentiment === "positive" && (
+        {displaySent === "positive" && (
           <div style={{ position: "absolute", bottom: -4, right: -4, width: 16, height: 16, borderRadius: "50%", background: COLORS.green, boxShadow: COLORS.greenGlow, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: "#000" }}>▲</div>
         )}
-        {item.sentiment === "negative" && (
+        {displaySent === "negative" && (
           <div style={{ position: "absolute", bottom: -4, right: -4, width: 16, height: 16, borderRadius: "50%", background: COLORS.red, boxShadow: COLORS.redGlow, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, color: "#fff" }}>▼</div>
         )}
       </div>
@@ -1188,17 +1235,17 @@ function NewsCard({ item, onClick }) {
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             {hasSimilar && <span style={{ fontSize: 9, color: COLORS.gold, fontFamily: "monospace" }}>📚 {item.similar.length}</span>}
             <span style={{ fontSize: 9, padding: "2px 8px", borderRadius: 5, fontFamily: "monospace", background: `${color}18`, color, border: `1px solid ${color}30`, letterSpacing: 0.8, fontWeight: 700 }}>
-              {label.toUpperCase()}
+              SENTIMENT: {label.toUpperCase()}
             </span>
           </div>
         </div>
         <div style={{ fontSize: 12, color: COLORS.text, lineHeight: 1.45, marginBottom: 5, fontWeight: 500 }}>{cleanTitle(item.title)}</div>
         <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
           {(() => {
-            const s   = Math.abs(item.model_score || 0);
-            const tier = scoreTier(s, item.confidence);
-            const clr  = tier === "Hot" ? COLORS.red : tier === "Medium" ? "#f97316" : COLORS.muted;
-            const dots = tier === "Hot" ? "●●●" : tier === "Medium" ? "●●" : "●";
+            const s   = displayScore(item);
+            const tier = scoreTier(s, item.confidence, item.sentiment);
+            const clr  = tier === "Hot" ? COLORS.red : tier === "Moderate" ? "#f97316" : COLORS.muted;
+            const dots = tier === "Hot" ? "●●●" : tier === "Moderate" ? "●●" : "●";
             return (
               <span style={{ fontSize: 10, color: COLORS.muted, display: "flex", alignItems: "center", gap: 4, position: "relative" }}>
                 <span
@@ -1208,7 +1255,7 @@ function NewsCard({ item, onClick }) {
                 >
                   {dots}
                 </span>
-                <span style={{ color: clr, fontWeight: 600 }}>{impactDisplayLabel(tier)}</span>
+                <span style={{ color: clr, fontWeight: 600 }}>Impact: {impactDisplayLabel(tier)}</span>
                 {bulletHover && (
                   <div style={{
                     position: "absolute", bottom: "calc(100% + 6px)", left: 0,
@@ -1218,13 +1265,13 @@ function NewsCard({ item, onClick }) {
                     boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
                   }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: clr, marginBottom: 4 }}>
-                      {dots} {impactDisplayLabel(tier)} Impact
+                      {dots} Impact: {impactDisplayLabel(tier)}
                     </div>
                     <div style={{ fontSize: 10, color: COLORS.text, lineHeight: 1.5, marginBottom: 6 }}>
                       {cleanTitle(item.title)}
                     </div>
                     <div style={{ fontSize: 10, color: COLORS.muted }}>
-                      <span style={{ color: color }}>{label}</span>
+                      <span style={{ color: color }}>Sentiment: {label}</span>
                     </div>
                   </div>
                 )}
@@ -1291,9 +1338,9 @@ function SignalCard({ item }) {
 
 function ConnectionDot({ connected }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 10px", borderRadius: 999, border: `1px solid ${COLORS.border}`, background: "rgba(255,255,255,0.035)" }}>
       <div style={{ width: 7, height: 7, borderRadius: "50%", background: connected ? COLORS.green : COLORS.red, boxShadow: connected ? `0 0 6px ${COLORS.green}` : "none" }} />
-      <span style={{ fontSize: 10, color: COLORS.muted, fontFamily: "monospace" }}>{connected ? "LIVE" : "OFFLINE"}</span>
+      <span style={{ fontSize: 10, color: COLORS.muted, fontFamily: "monospace", fontWeight: 800, letterSpacing: 1 }}>{connected ? "LIVE" : "OFFLINE"}</span>
     </div>
   );
 }
@@ -1698,9 +1745,10 @@ function CustomAnalyzer() {
 
             {/* Impact + Sentiment */}
             {(() => {
-              const impClr = result.impact === "Hot" ? COLORS.red : result.impact === "Medium" ? "#f97316" : COLORS.muted;
-              const sentColor = result.sentiment === "positive" ? COLORS.green : result.sentiment === "negative" ? COLORS.red : COLORS.muted;
-              const sentLabel = result.sentiment === "positive" ? "▲ BULLISH" : result.sentiment === "negative" ? "▼ BEARISH" : "● NEUTRAL";
+              const impClr = result.impact === "Hot" ? COLORS.red : result.impact === "Moderate" ? "#f97316" : COLORS.muted;
+              const resultSent = displaySentiment(result);
+              const sentColor = resultSent === "positive" ? COLORS.green : resultSent === "negative" ? COLORS.red : COLORS.muted;
+              const sentLabel = resultSent === "positive" ? "▲ BULLISH" : resultSent === "negative" ? "▼ BEARISH" : "● NEUTRAL";
               const impactLabel = impactDisplayLabel(result.impact);
               return (
                 <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 20, flexWrap: "wrap" }}>
@@ -2199,6 +2247,7 @@ export default function CryptoDashboard() {
         _cfg.scoreHot  = data.score_hot    ?? _cfg.scoreHot;
         _cfg.scoreMed  = data.score_medium ?? _cfg.scoreMed;
         _cfg.scoreShow = data.score_show   ?? _cfg.scoreShow;
+        _cfg.confHot   = data.conf_hot     ?? _cfg.confHot;
         _cfg.confMin   = data.conf_min     ?? _cfg.confMin;
         if (Array.isArray(data.reliable_channels))
           _cfg.reliableChannels = new Set(data.reliable_channels);
@@ -2321,7 +2370,7 @@ export default function CryptoDashboard() {
       if (!dateSeen.has(dk)) { dateSeen.add(dk); orderedDates.push(dk); }
     }
     // pick the most recent day that has at least one item passing the display filter
-    // so we never land on a day where every item is Hidden tier
+    // so we never land on a day where every item is Low tier
     const latestKey = orderedDates.find(dk =>
       unique.some(n => {
         const ts = n.published_ts || n.received_at;
@@ -2356,8 +2405,8 @@ export default function CryptoDashboard() {
     localDateKey(mostRecentDayNews[0].published_ts || mostRecentDayNews[0].received_at || 0) === todayLocal;
 
   // Tab filters — live impact badges use only the production 15-minute score.
-  const hotTabNews       = newsForDate(n => passesFilter(n) && scoreTier(Math.abs(n.model_score || 0), n.confidence) === "Hot");
-  const importantTabNews = newsForDate(n => passesFilter(n) && scoreTier(Math.abs(n.model_score || 0), n.confidence) === "Medium");
+  const hotTabNews       = newsForDate(n => passesFilter(n) && scoreTier(displayScore(n), n.confidence, n.sentiment) === "Hot");
+  const importantTabNews = newsForDate(n => passesFilter(n) && scoreTier(displayScore(n), n.confidence, n.sentiment) === "Moderate");
   const keyTabNews       = newsForDate(n => passesFilter(n) && newsTier(n).tier === "Key");   // Editorially important regardless of price impact
   const allTabNews       = newsForDate(passesFilter);
 
@@ -2387,16 +2436,59 @@ export default function CryptoDashboard() {
     : (mostRecentIsToday ? "Today" : mostRecentDateLabel);
 
   return (
-    <div style={{ display: "flex", height: "100vh", width: "100vw", background: COLORS.bg, color: COLORS.text, fontFamily: "'DM Sans', system-ui, sans-serif", overflow: "hidden" }}>
+    <div style={{
+      display: "flex", height: "100vh", width: "100vw",
+      background: COLORS.siteBg,
+      color: COLORS.text,
+      fontFamily: "'Inter', 'DM Sans', system-ui, sans-serif",
+      overflow: "hidden",
+      position: "relative",
+    }}>
+      <div style={{
+        position: "fixed", inset: 0, pointerEvents: "none", opacity: 0.42,
+        backgroundImage: "linear-gradient(rgba(211,196,255,0.045) 1px, transparent 1px), linear-gradient(90deg, rgba(211,196,255,0.045) 1px, transparent 1px)",
+        backgroundSize: "96px 96px",
+        maskImage: "radial-gradient(circle at 50% 24%, black, transparent 72%)",
+      }} />
 
       {/* ── Sidebar ── */}
-      <div style={{ width: 230, flexShrink: 0, background: "linear-gradient(180deg, #0a0e1a 0%, #070a12 100%)", borderRight: `1px solid ${COLORS.border}`, display: "flex", flexDirection: "column", height: "100%" }}>
-        <div style={{ padding: "24px 16px 20px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
-          <div style={{ position: "relative" }}>
-            <img src="/logo_center.avif" alt="logo" style={{ width: 52, height: 52, borderRadius: 14, objectFit: "cover", display: "block" }} />
-            <div style={{ position: "absolute", inset: -1, borderRadius: 15, background: "transparent", boxShadow: COLORS.accentGlow, pointerEvents: "none" }} />
+      <div style={{
+        width: 310, flexShrink: 0,
+        background: "linear-gradient(180deg, rgba(8,8,12,0.96) 0%, rgba(10,8,16,0.92) 100%)",
+        borderRight: `1px solid ${COLORS.border}`,
+        boxShadow: "18px 0 60px rgba(0,0,0,0.28)",
+        display: "flex", flexDirection: "column", height: "100%", zIndex: 1,
+      }}>
+        <div style={{ padding: "24px 18px 22px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ position: "relative", flexShrink: 0 }}>
+            <img src="/logo_center.avif" alt="BlockchainIST logo" style={{ width: 58, height: 58, borderRadius: 16, objectFit: "cover", display: "block" }} />
+            <div style={{ position: "absolute", inset: -2, borderRadius: 18, background: "transparent", boxShadow: "0 0 24px rgba(124,77,255,0.42)", pointerEvents: "none" }} />
           </div>
-          <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.text, letterSpacing: 0.5, textAlign: "center", lineHeight: 1.4 }}>Sentiment<br/><span style={{ color: COLORS.accent, fontWeight: 500, fontSize: 11 }}>Analysis</span></div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{
+              fontSize: 27,
+              fontWeight: 900,
+              letterSpacing: -1.1,
+              lineHeight: 1,
+              background: COLORS.brandGradient,
+              WebkitBackgroundClip: "text",
+              backgroundClip: "text",
+              color: "transparent",
+              whiteSpace: "nowrap",
+            }}>
+              BlockchainIST
+            </div>
+            <div style={{
+              marginTop: 8,
+              fontSize: 11,
+              fontWeight: 800,
+              letterSpacing: 1.8,
+              color: COLORS.muted,
+              whiteSpace: "nowrap",
+            }}>
+              SENTIMENT ANALYSIS
+            </div>
+          </div>
         </div>
         <div style={{ flex: 1, padding: "14px 10px", overflowY: "auto" }}>
           {navItems.map(item => (
@@ -2430,7 +2522,7 @@ export default function CryptoDashboard() {
       </div>
 
       {/* ── Main area ── */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative", zIndex: 1 }}>
         <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
 
           {/* ── News & Sentiment full view ── */}
@@ -2441,7 +2533,7 @@ export default function CryptoDashboard() {
               <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
                 {/* Header + tabs */}
-                <div style={{ padding: "12px 20px", borderBottom: `1px solid ${COLORS.border}`, background: COLORS.panel, flexShrink: 0 }}>
+                <div style={{ padding: "12px 20px", borderBottom: `1px solid ${COLORS.border}`, background: "rgba(18,16,27,0.72)", backdropFilter: "blur(16px)", flexShrink: 0 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                     <span style={{ fontSize: 13, fontWeight: 600 }}>
                       📰 News — <span style={{ color: COLORS.accent }}>{dateLabel}</span>
@@ -2457,10 +2549,10 @@ export default function CryptoDashboard() {
                         { id: "all", label: "All",   count: allTabNews.length },
                       ].map(t => (
                         <button key={t.id} onClick={() => setNewsTab(t.id)} style={{
-                          padding: "4px 12px", borderRadius: 6, border: "none", cursor: "pointer", fontSize: 11,
-                          background: newsTab === t.id ? COLORS.accent : COLORS.border2,
-                          color: newsTab === t.id ? "#000" : COLORS.muted,
-                          fontWeight: newsTab === t.id ? 700 : 400,
+                          padding: "7px 14px", borderRadius: 999, border: `1px solid ${newsTab === t.id ? "rgba(196,181,253,0.36)" : COLORS.border}`, cursor: "pointer", fontSize: 11,
+                          background: newsTab === t.id ? "linear-gradient(135deg, #7c4dff, #8b5cf6)" : "rgba(255,255,255,0.035)",
+                          color: newsTab === t.id ? COLORS.text : COLORS.muted,
+                          fontWeight: 800,
                         }}>
                           {t.label} <span style={{ fontSize: 10, opacity: 0.8 }}>({t.count})</span>
                         </button>
@@ -2474,10 +2566,10 @@ export default function CryptoDashboard() {
                         { id: "eth", label: "Ξ ETH",     color: "#627EEA" },
                       ].map(c => (
                         <button key={c.id} onClick={() => setCoinFilter(c.id)} style={{
-                          padding: "3px 10px", borderRadius: 12, border: "none", cursor: "pointer", fontSize: 11,
-                          background: coinFilter === c.id ? c.color : COLORS.border2,
-                          color: coinFilter === c.id ? "#fff" : COLORS.muted,
-                          fontWeight: coinFilter === c.id ? 700 : 400,
+                          padding: "6px 11px", borderRadius: 999, border: `1px solid ${coinFilter === c.id ? `${c.color}80` : COLORS.border}`, cursor: "pointer", fontSize: 11,
+                          background: coinFilter === c.id ? `${c.color}24` : "rgba(255,255,255,0.035)",
+                          color: coinFilter === c.id ? COLORS.text : COLORS.muted,
+                          fontWeight: 800,
                         }}>{c.label}</button>
                       ))}
                     </div>
@@ -2499,7 +2591,7 @@ export default function CryptoDashboard() {
               </div>
 
               {/* Calendar sidebar */}
-              <div style={{ width: 248, flexShrink: 0, borderLeft: `1px solid ${COLORS.border}`, padding: 16, overflowY: "auto", background: COLORS.panel }}>
+              <div style={{ width: 248, flexShrink: 0, borderLeft: `1px solid ${COLORS.border}`, padding: 16, overflowY: "auto", background: "rgba(18,16,27,0.64)", backdropFilter: "blur(14px)" }}>
                 <div style={{ fontSize: 11, fontWeight: 600, color: COLORS.muted, letterSpacing: 1, marginBottom: 10 }}>FILTER BY DATE</div>
                 <CalendarPicker selected={calendarDate} onChange={setCalendarDate} dbDates={dbDates} />
               </div>
@@ -2540,16 +2632,16 @@ export default function CryptoDashboard() {
           {activeNav === "Dashboard" && (
             <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
               {/* Chart header — BTC / ETH switcher + interval + clock */}
-              <div style={{ padding: "10px 20px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", alignItems: "center", gap: 12, background: "rgba(8,12,20,0.95)", backdropFilter: "blur(12px)", flexShrink: 0, position: "sticky", top: 0, zIndex: 10 }}>
+              <div style={{ padding: "12px 20px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", alignItems: "center", gap: 12, background: "rgba(18,16,27,0.72)", backdropFilter: "blur(18px)", flexShrink: 0, position: "sticky", top: 0, zIndex: 10 }}>
                 <div style={{ display: "flex", gap: 6 }}>
                   {[
                     { sym: "BTCUSDT", label: "₿ BTC", color: "#F7931A" },
                     { sym: "ETHUSDT", label: "Ξ ETH", color: "#627EEA" },
                   ].map(({ sym, label, color }) => (
                     <button key={sym} onClick={() => { setSelectedSymbol(sym); setSelectedPair(`BINANCE:${sym}`); }} style={{
-                      padding: "5px 16px", borderRadius: 9, fontSize: 12, cursor: "pointer", fontWeight: 700,
+                      padding: "7px 16px", borderRadius: 999, fontSize: 12, cursor: "pointer", fontWeight: 800,
                       border: `1px solid ${selectedSymbol === sym ? `${color}60` : COLORS.border}`,
-                      background: selectedSymbol === sym ? `${color}18` : "transparent",
+                      background: selectedSymbol === sym ? `${color}20` : "rgba(255,255,255,0.025)",
                       color: selectedSymbol === sym ? color : COLORS.muted,
                       boxShadow: selectedSymbol === sym ? `0 0 14px ${color}20` : "none",
                       transition: "all 0.15s",
@@ -2557,14 +2649,14 @@ export default function CryptoDashboard() {
                   ))}
                 </div>
                 <div style={{ width: 1, height: 18, background: COLORS.border }} />
-                <div style={{ display: "flex", gap: 3, background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: "3px 4px", border: `1px solid ${COLORS.border}` }}>
+                <div style={{ display: "flex", gap: 3, background: "rgba(255,255,255,0.04)", borderRadius: 999, padding: "4px", border: `1px solid ${COLORS.border}` }}>
                   {["1m","5m","15m","1h","4h","1d"].map(iv => (
                     <button key={iv} onClick={() => setChartInterval(iv)} style={{
-                      padding: "3px 9px", borderRadius: 6, fontSize: 10, cursor: "pointer", fontFamily: "monospace",
+                      padding: "5px 10px", borderRadius: 999, fontSize: 10, cursor: "pointer", fontFamily: "monospace",
                       border: "none",
-                      background: chartInterval === iv ? COLORS.accent : "transparent",
-                      color: chartInterval === iv ? "#000" : COLORS.muted,
-                      fontWeight: chartInterval === iv ? 700 : 400,
+                      background: chartInterval === iv ? "linear-gradient(135deg, #7c4dff, #8b5cf6)" : "transparent",
+                      color: chartInterval === iv ? COLORS.text : COLORS.muted,
+                      fontWeight: chartInterval === iv ? 800 : 500,
                       boxShadow: chartInterval === iv ? COLORS.accentGlow : "none",
                       transition: "all 0.12s",
                     }}>{iv}</button>

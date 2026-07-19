@@ -47,14 +47,21 @@ def test_config_endpoint_values_match_config():
 
 # ── 2. Impact vocabulary contract ─────────────────────────────────────────────
 
-VALID_IMPACT_LABELS = {"Hot", "Medium", "Show", "Low"}
+VALID_IMPACT_LABELS = {"Hot", "Moderate", "Low"}
 
 
 def test_config_impact_tier_vocabulary():
     """config.impact_tier() must return only valid labels."""
     from config import impact_tier
-    for s15, s1h in [(0.0, 0.0), (0.29, 0.29), (0.30, 0.30), (0.55, 0.55), (0.80, 0.80), (1.0, 1.0)]:
-        label = impact_tier(s15, s1h)
+    for s15, s1h, conf, sentiment in [
+        (0.0, 0.0, 100, "positive"),
+        (0.39, 0.39, 100, "positive"),
+        (0.40, 0.40, 60, "positive"),
+        (0.60, 0.60, 70, "positive"),
+        (0.80, 0.80, 70, "neutral"),
+        (1.0, 1.0, 70, "negative"),
+    ]:
+        label = impact_tier(s15, s1h, confidence=conf, sentiment=sentiment)
         assert label in VALID_IMPACT_LABELS, f"impact_tier({s15},{s1h}) returned unexpected '{label}'"
 
 
@@ -62,7 +69,7 @@ def test_server_recompute_impact_vocabulary():
     """_recompute_impact() must return only the canonical vocabulary."""
     import api.server as srv
     for score in (0.0, 0.25, 0.30, 0.54, 0.55, 0.79, 0.80, 1.0):
-        item = {"model_score": score, "model_score_1h": score}
+        item = {"model_score": score, "model_score_1h": score, "confidence": 70, "sentiment": "positive"}
         label = srv._recompute_impact(item)
         assert label in VALID_IMPACT_LABELS, f"_recompute_impact at score={score} returned '{label}'"
 
@@ -70,12 +77,14 @@ def test_server_recompute_impact_vocabulary():
 def test_impact_tier_boundaries():
     """Boundary values must land in the correct tiers."""
     from config import impact_tier
-    assert impact_tier(0.80, 0.00) == "Hot"
+    assert impact_tier(0.60, 0.00, confidence=70, sentiment="positive") == "Hot"
+    assert impact_tier(0.60, 0.00, confidence=69, sentiment="positive") == "Moderate"
+    assert impact_tier(0.60, 0.00, confidence=70, sentiment="neutral") == "Moderate"
     # Historical 1h values must never promote a live item.
-    assert impact_tier(0.00, 0.80) == "Low"
-    assert impact_tier(0.60, 0.00) == "Medium"  # user-facing High
-    assert impact_tier(0.43, 0.00) == "Show"    # user-facing Medium
-    assert impact_tier(0.42, 0.42) == "Low"
+    assert impact_tier(0.00, 0.80, confidence=100, sentiment="positive") == "Low"
+    assert impact_tier(0.40, 0.00, confidence=60, sentiment="negative") == "Moderate"
+    assert impact_tier(0.40, 0.00, confidence=59, sentiment="negative") == "Low"
+    assert impact_tier(0.39, 0.39, confidence=100, sentiment="negative") == "Low"
 
 
 def test_server_live_gate_ignores_historical_1h_score():

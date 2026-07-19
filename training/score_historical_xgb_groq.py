@@ -208,8 +208,15 @@ def to_cache_items(df: pd.DataFrame, p15: np.ndarray, p1h: np.ndarray,
 
         sentiment = str(row.get("sentiment", "neutral") or "neutral")
         sig_type  = "BUY" if sentiment == "positive" else ("SELL" if sentiment == "negative" else "NEUTRAL")
+        confidence = float(row.get("confidence") or 0)
+        confidence_pct = confidence * 100 if confidence <= 1.0 else confidence
 
-        impact = _impact_tier(prob15, prob1h)
+        impact = _impact_tier(
+            prob15,
+            prob1h,
+            confidence=confidence_pct,
+            sentiment=sentiment,
+        )
 
         items.append({
             "id":              f"hist_{pub_ts}_{hash(str(row.get('title',''))[:30]) % 100000}",
@@ -221,7 +228,7 @@ def to_cache_items(df: pd.DataFrame, p15: np.ndarray, p1h: np.ndarray,
             "published_ts":    pub_ts,
             "sentiment":       sentiment,
             "sentiment_score": float(row.get("sentiment_score") or 0),
-            "confidence":      round(float(row.get("confidence") or 0) * 100, 1),
+            "confidence":      round(confidence_pct, 1),
             "weight":          float(row.get("weight") or 0),
             "prob_positive":   float(row.get("prob_positive") or 0),
             "prob_negative":   float(row.get("prob_negative") or 0),

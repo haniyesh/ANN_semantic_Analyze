@@ -87,7 +87,12 @@ def build_cache_items(df: pd.DataFrame, groq: dict) -> list:
         sent_score = float(row.get("sentiment_score") or 0)
         model_score = confidence if label != "neutral" else confidence * 0.3
 
-        impact = _impact_tier(model_score, model_score)
+        impact = _impact_tier(
+            model_score,
+            model_score,
+            confidence=confidence,
+            sentiment=label,
+        )
 
         items.append({
             "id":              f"groq_{pub_ts}_{hash(title[:30]) % 100000}",

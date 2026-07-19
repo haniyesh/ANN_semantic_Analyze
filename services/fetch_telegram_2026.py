@@ -411,7 +411,12 @@ def to_cache_items(msgs, cb_probs, p15, p1h, thr15, thr1h):
             "score_normalized": True,
             "pred_15m":        int(prob15 >= thr15),
             "pred_1h":         int(prob1h >= thr1h),
-            "impact":          _impact_tier(prob15, prob1h),
+            "impact":          _impact_tier(
+                prob15,
+                prob1h,
+                confidence=conf * 100,
+                sentiment=sent,
+            ),
             "source":          "telegram_2025_2026",
         })
     return items
